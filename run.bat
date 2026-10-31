@@ -1,12 +1,28 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-python -c "import pystray, PIL, pycaw" 2>nul
+
+where python >nul 2>nul
 if errorlevel 1 (
-    echo Installing dependencies...
-    python -m pip install -r requirements.txt -q
+    echo Python не найден. Установите Python 3.10+ с python.org ^(галочка "Add to PATH"^).
+    pause
+    exit /b 1
 )
-for /f "tokens=*" %%P in ('python -c "import sys; print(sys.executable)"') do set PYTHON=%%P
-set PYTHONW=%PYTHON:python.exe=pythonw.exe%
-if not exist "%PYTHONW%" set PYTHONW=%PYTHON%
-start "" "%PYTHONW%" "%~dp0soundfixer.py"
+
+python -c "import pycaw, pystray, PIL, numpy, sounddevice, pedalboard" 2>nul
+if errorlevel 1 (
+    echo Установка зависимостей...
+    python -m pip install --upgrade -r requirements.txt
+    if errorlevel 1 (
+        echo Не удалось установить зависимости.
+        pause
+        exit /b 1
+    )
+)
+
+where pythonw >nul 2>nul
+if errorlevel 1 (
+    start "" python "%~dp0SoundFixer.pyw" %*
+) else (
+    start "" pythonw "%~dp0SoundFixer.pyw" %*
+)
