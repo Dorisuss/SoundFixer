@@ -13,6 +13,7 @@ if not exist "%RNNOISE%" (
 )
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name SoundFixer ^
     --collect-all pedalboard --collect-submodules edge_tts --hidden-import pystray._win32 ^
+    --collect-submodules soundfixer ^
     %ADDBIN% ^
     --exclude-module matplotlib --exclude-module scipy --exclude-module pandas ^
     SoundFixer.pyw

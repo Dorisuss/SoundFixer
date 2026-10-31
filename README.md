@@ -53,6 +53,22 @@
 - 5-полосный эквалайзер и пресеты: бас, голос, игры (слышно шаги), кино, музыка…
 - Ширина стерео (от моно до «широко»), баланс, кроссфид для наушников, ночной режим.
 
+**Мультитул** (вкладка «Инструменты»: каждый включается отдельно, выключенный не загружается)
+- **Исправление раскладки**: набрали «ghbdtn» — жмёте `Pause` (или свою клавишу), и выделенный
+  текст или слово перед курсором становится «привет». Работает в обе стороны, раскладка
+  переключается сама, буфер обмена возвращается как был.
+- **Игры**: клавиша Win не сворачивает игру; не выскакивает «Залипание клавиш» (5× Shift) и похожие
+  окна; в игре сама включается английская раскладка. Игры из Steam, Epic, GOG, Riot, Battle.net,
+  Xbox, Ubisoft, EA и папок «Games» распознаются автоматически, можно добавить свои.
+  Перехват клавиатуры ставится только пока игра на экране, настройки Windows меняются лишь
+  на текущий сеанс и возвращаются при выключении.
+- **Интернет**: пинг и потери пакетов в подсказке трея, уведомление, когда связь портится.
+  **«Выключить после загрузки»**: когда скорость скачивания (Steam и т.п.) падает ниже порога
+  на N минут — сон, гибернация или выключение с отсчётом и отменой из трея.
+- **Окна**: закрепить активное окно поверх всех (`Ctrl+Alt+T`) и менять его прозрачность
+  (`Ctrl+Alt+PgDn/PgUp`) — например, видео или чат поверх игры.
+- **Не засыпать**: компьютер не уходит в сон, по желанию и экран не гаснет (есть в меню трея).
+
 ## Установка
 
 1. Установите [Python 3.10+](https://www.python.org/downloads/) (галочка **Add Python to PATH**).
@@ -93,7 +109,8 @@ SoundFixer сам назначит виртуальные устройства �
 - Эффекты — десятки микросекунд на блок 10 мс (C++), ИИ-шумодав — доли миллисекунды.
 - Выход в наушники для озвучки/звуков открывается при воспроизведении и закрывается после простоя.
 - Синтез речи идёт в отдельном потоке и не задерживает переключение устройств.
-- Нет таймеров опроса: устройства, горячие клавиши, второй запуск — всё на событиях Windows.
+- Нет таймеров опроса: устройства, горячие клавиши, второй запуск, смена активного окна — всё
+  на событиях Windows. Перехват клавиатуры включается только на время игры.
 - Окно создаётся только при первом открытии, индикаторы уровня работают, только пока их видно.
 - Из Core Audio читаются только нужные свойства устройств (в разы быстрее, чем через `pycaw.GetAllDevices`).
 
@@ -113,4 +130,7 @@ radio…), speaks typed text (Windows voices offline or Microsoft neural voices 
 soundboard clips and quick phrases with hotkeys, and adds a 5-band EQ, stereo width, crossfeed and
 night mode for headphones. TTS and sounds always play to your headphones; to send them (and your
 processed voice) to other apps, route through a free [VB-Audio Virtual Cable](https://vb-audio.com/Cable/).
-Built-in "Check everything" diagnostics. Run `run.bat` or build `SoundFixer.exe` with `build.bat`.
+Built-in "Check everything" diagnostics. Plus a multitool tab: keyboard-layout fixer (ghbdtn → привет),
+game guard (Win key / Sticky Keys prompt blocking, English layout in games), ping in the tray with alerts,
+sleep/shutdown after a download finishes, always-on-top and window opacity hotkeys, keep-awake.
+Run `run.bat` or build `SoundFixer.exe` with `build.bat`.

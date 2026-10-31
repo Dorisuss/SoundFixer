@@ -20,6 +20,7 @@ class Tray:
         self.app = app
         self.icon = pystray.Icon(APP_NAME, tray_icon(), APP_NAME, menu=self._menu())
         self._thread = None
+        self._title = APP_NAME
 
     def _menu(self) -> Menu:
         app = self.app
@@ -49,6 +50,14 @@ class Tray:
                  checked=lambda _it: app.cfg["spk"]["enabled"]),
             Item("Применить устройства сейчас", lambda: ui(app.apply_now)),
             Menu.SEPARATOR,
+            Item(lambda _it: f"Интернет: {app.tools.tray_text() or '—'}", None, enabled=False,
+                 visible=lambda _it: bool(app.tools.get("ping") and app.tools.get("ping").running)),
+            Item("Не засыпать", lambda: ui(app.toggle_tool, "awake"),
+                 checked=lambda _it: app.cfg["tools"]["awake"]["enabled"]),
+            Item(lambda _it: "Отменить выключение после загрузки" if app.download_active
+                 else "Выключить после загрузки",
+                 lambda: ui(app.cancel_download_watch if app.download_active else app.start_download_watch)),
+            Menu.SEPARATOR,
             Item("Запускать с Windows", lambda: ui(app.toggle_autostart),
                  checked=lambda _it: app.autostart_enabled),
             Item("Выход", lambda: ui(app.quit)),
@@ -63,14 +72,24 @@ class Tray:
         app = self.app
         active = app.cfg["mic"]["enabled"] or app.cfg["spk"]["enabled"]
         self.icon.icon = tray_icon(active, app.muted)
-        tip = f"{APP_NAME} — {app.cfg['active_profile']}"
-        if app.muted:
-            tip += " (микрофон выключен)"
-        self.icon.title = tip[:127]
+        self.refresh_title()
         try:
             self.icon.update_menu()
         except Exception:  # noqa: BLE001 — меню ещё не создано
             pass
+
+    def refresh_title(self) -> None:
+        """Только подсказка у иконки (дёшево — можно часто, например для пинга)."""
+        app = self.app
+        tip = f"{APP_NAME} — {app.cfg['active_profile']}"
+        if app.muted:
+            tip += " (микрофон выключен)"
+        extra = app.tools.tray_text()
+        if extra:
+            tip += "\n" + extra
+        if tip[:127] != self._title:
+            self._title = tip[:127]
+            self.icon.title = self._title
 
     def notify(self, title: str, text: str) -> None:
         if self.icon.visible:

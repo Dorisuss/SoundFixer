@@ -81,6 +81,16 @@ DEFAULTS: dict = {
         "repeat_hotkey": "",       # повторить последнюю фразу
         "history": [],
     },
+    "tools": {  # мультитул: каждый инструмент включается отдельно, выключенный не загружается
+        "layout": {"enabled": False, "hotkey": "pause"},
+        "games": {"enabled": False, "block_win": True, "no_sticky": True, "english": True,
+                  "fullscreen": True, "list": []},
+        "ping": {"enabled": False, "host": "1.1.1.1", "warn_ms": 150, "warn_loss": 5, "notify": True},
+        "windows": {"enabled": False, "topmost_hotkey": "ctrl+alt+t", "fade_more": "ctrl+alt+page down",
+                    "fade_less": "ctrl+alt+page up"},
+        "awake": {"enabled": False, "display": True},
+        "download": {"action": "sleep", "kbps": 300, "minutes": 3},
+    },
     "soundboard": {
         "volume": 80,
         "monitor": True,

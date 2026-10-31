@@ -23,6 +23,7 @@ import tkinter as tk
 from . import APP_NAME, autostart, config, winaudio
 from .control import Worker
 from .hotkeys import Hotkeys, PushToTalk
+from .tools import ToolManager
 from .tray import Tray
 from .winaudio import CAPTURE, RENDER, Device, pair_capture
 
@@ -69,6 +70,7 @@ class App:
         self.tray = Tray(self)
         self.hotkeys = Hotkeys(lambda name: self.ui(self._on_hotkey, name))
         self.ptt = PushToTalk(lambda down: self.ui(self._on_ptt, down))
+        self.tools = ToolManager(self)
 
     # ================================================================ запуск/выход
     def run(self) -> None:
@@ -79,6 +81,7 @@ class App:
         self.root.after(0, lambda: self.worker.submit(self._w_init))
         self.tray.start()
         self.hotkeys.start()
+        self.tools.sync(self.cfg["tools"])
         self._sync_hotkeys()
         self._sync_ptt()
         self.root.after(200, self.tray.refresh)
@@ -93,6 +96,7 @@ class App:
         self.save_now()
         self.ptt.stop()
         self.hotkeys.stop()
+        self.tools.stop_all()  # вернуть настройки Windows (залипание клавиш, сон) как были
         try:
             self.worker.call(self._w_shutdown, timeout=5)
         except Exception:  # noqa: BLE001
@@ -191,7 +195,8 @@ class App:
         self.autostart_enabled = autostart.is_enabled()
         self.refresh_ui()
 
-    def settings_changed(self, devices: bool = False, hotkeys: bool = False, sync: bool = False) -> None:
+    def settings_changed(self, devices: bool = False, hotkeys: bool = False, sync: bool = False,
+                         tools: bool = False) -> None:
         """Вызывается GUI при любом изменении настроек.
 
         devices — сразу перепроверить устройства/аудиопотоки; sync — перепроверить с задержкой
@@ -201,6 +206,9 @@ class App:
         eng = self.engine
         if eng is not None:  # параметры звука применяются мгновенно, без потока управления
             self._push_dsp(eng, self.cfg)
+        if tools:
+            self.tools.sync(self.cfg["tools"])
+            hotkeys = True
         if hotkeys:
             self._sync_hotkeys()
             self._sync_ptt()
@@ -263,6 +271,7 @@ class App:
         for i, snd in enumerate(self.cfg["soundboard"]["sounds"]):
             if snd.get("hotkey"):
                 b[f"sound:{i}"] = snd["hotkey"]
+        b.update(self.tools.hotkeys(self.cfg["tools"]))
         self.hotkeys.set_bindings(b)
 
     def _on_hotkey(self, name: str) -> None:
@@ -274,6 +283,43 @@ class App:
             self.repeat_last()
         elif name.startswith("sound:"):
             self.play_sound(int(name.split(":", 1)[1]))
+        elif name.startswith("tool:"):
+            self.tools.on_hotkey(name)
+
+    # ---------------------------------------------------------------- мультитул
+    def toggle_tool(self, key: str) -> None:
+        cfg = self.cfg["tools"][key]
+        cfg["enabled"] = not cfg["enabled"]
+        self.settings_changed(tools=True)
+        self.refresh_ui()
+
+    def tool_status_changed(self, key: str) -> None:
+        """Инструмент сообщил о новом состоянии (вызывается в GUI-потоке)."""
+        self.tray.refresh_title()
+        if self.window is not None:
+            self.window.refresh_tool(key)
+
+    def start_download_watch(self) -> None:
+        from .tools.network import DownloadWatcher
+
+        self.cancel_download_watch()
+        d = self.cfg["tools"]["download"]
+        self.tools.download = DownloadWatcher(self, d["action"], float(d["kbps"]), float(d["minutes"]))
+        self.tools.download.start()
+        self.tool_status_changed("download")
+        self.tray.refresh()
+
+    def cancel_download_watch(self) -> None:
+        if self.tools.download is not None:
+            self.tools.download.cancel()
+            self.tool_status_changed("download")
+            self.tools.download = None
+            self.tray.refresh()
+
+    @property
+    def download_active(self) -> bool:
+        d = self.tools.download
+        return d is not None and d.state in ("waiting", "downloading", "countdown")
 
     # ---------------------------------------------------------------- озвучка / саундборд
     def speak(self, text: str, remember: bool = True) -> None:

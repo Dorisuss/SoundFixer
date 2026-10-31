@@ -72,6 +72,7 @@ class MainWindow:
         self._tab_mic()
         self._tab_spk()
         self._tab_speech()
+        self._tab_tools()
         self._tab_settings()
         nb.bind("<<NotebookTabChanged>>", lambda _e: self._start_meters())
         self.refresh_devices()
@@ -180,7 +181,7 @@ class MainWindow:
         return box
 
     def _check(self, parent, text, section, key, devices=False, hotkeys=False, style="TCheckbutton", cmd=None,
-               sync=False):
+               sync=False, tools=False):
         var = tk.BooleanVar(value=self._get(section, key))
 
         def changed():
@@ -189,14 +190,17 @@ class MainWindow:
             self._set(section, key, var.get())
             if cmd:
                 cmd()
-            self.app.settings_changed(devices=devices, hotkeys=hotkeys, sync=sync)
+            self.app.settings_changed(devices=devices, hotkeys=hotkeys, sync=sync, tools=tools)
+            if tools:
+                self.refresh_tool(section[1] if isinstance(section, tuple) else "")
 
         cb = ttk.Checkbutton(parent, text=text, variable=var, command=changed, style=style)
         cb.grid(row=self._next_row(parent), column=0, columnspan=3, sticky="w", pady=2)
         self._sync_vars.append((var, lambda: self._get(section, key)))
         return var
 
-    def _slider(self, parent, text, section, key, lo, hi, fmt=str, step=1.0, cmd=None, devices=False, sync=False):
+    def _slider(self, parent, text, section, key, lo, hi, fmt=str, step=1.0, cmd=None, devices=False, sync=False,
+                tools=False):
         row = self._next_row(parent)
         ttk.Label(parent, text=text).grid(row=row, column=0, sticky="w", padx=(0, 8))
         var = tk.DoubleVar(value=self._get(section, key))
@@ -216,7 +220,7 @@ class MainWindow:
             self._set(section, key, v)
             if cmd:
                 cmd()
-            self.app.settings_changed(devices=devices, sync=sync)
+            self.app.settings_changed(devices=devices, sync=sync, tools=tools)
 
         sc = ttk.Scale(parent, from_=lo, to=hi, variable=var, command=changed)
         sc.grid(row=row, column=1, sticky="ew", pady=3)
@@ -227,18 +231,28 @@ class MainWindow:
         return var
 
     def _reset_slider(self, section, key, var, changed):
-        default = config.DEFAULTS[section][key] if section else config.DEFAULTS[key]
+        d = config.DEFAULTS
+        for part in (section if isinstance(section, tuple) else (section,) if section else ()):
+            d = d[part]
+        default = d[key]
         var.set(default)
         changed()
 
+    def _section(self, section):
+        if not section:
+            return self.cfg
+        if isinstance(section, tuple):  # вложенный раздел, например ("tools", "ping")
+            d = self.cfg
+            for part in section:
+                d = d[part]
+            return d
+        return self.cfg[section]
+
     def _get(self, section, key):
-        return self.cfg[section][key] if section else self.cfg[key]
+        return self._section(section)[key]
 
     def _set(self, section, key, value):
-        if section:
-            self.cfg[section][key] = value
-        else:
-            self.cfg[key] = value
+        self._section(section)[key] = value
 
     def _meter(self, parent, label) -> tk.Canvas:
         row = self._next_row(parent)
@@ -267,7 +281,7 @@ class MainWindow:
                 return "break"
             var.set(combo)
             self._set(section, key, combo)
-            self.app.settings_changed(hotkeys=hotkeys)
+            self.app.settings_changed(hotkeys=hotkeys, tools=isinstance(section, tuple))
             return "break"
 
         ent.bind("<KeyPress>", on_key)
@@ -617,7 +631,7 @@ class MainWindow:
 
     # ================================================================ вкладка «Озвучка и звуки»
     def _tab_speech(self):
-        page = self._page("Озвучка и звуки")
+        page = self._page("Озвучка")
         card = self._card(page, "Состояние")
         self.route_lbl = self._status_label(card)
         self.speech_status = self._status_label(card)
@@ -857,6 +871,187 @@ class MainWindow:
         self.app.settings_changed(hotkeys=True)
         self._refresh_lists()
 
+    # ================================================================ вкладка «Инструменты»
+    def _tab_tools(self):
+        page = self._page("Инструменты")
+        self.tool_status: dict[str, ttk.Label] = {}
+        self._hint(self._card(page, "Мультитул"),
+                   "Каждый инструмент включается отдельно. Выключенный не загружается и не тратит ни память, "
+                   "ни процессор. Горячие клавиши задаются кликом по полю и нажатием сочетания.", row=0)
+
+        card = self._card(page, "Исправление раскладки")
+        self._check(card, "Включить", ("tools", "layout"), "enabled", tools=True, style="Big.TCheckbutton")
+        self._hotkey_entry(card, "Клавиша", ("tools", "layout"), "hotkey")
+        self.tool_status["layout"] = self._status_label(card)
+        self._hint(card, "Набрали «ghbdtn» вместо «привет»? Нажмите клавишу — выделенный текст (или слово перед "
+                         "курсором) исправится, а раскладка переключится сама. Работает в обе стороны.")
+
+        card = self._card(page, "Игры")
+        self._check(card, "Включить", ("tools", "games"), "enabled", tools=True, style="Big.TCheckbutton")
+        self._check(card, "Клавиша Win не сворачивает игру", ("tools", "games"), "block_win", tools=True)
+        self._check(card, "Не показывать «Залипание клавиш» (5× Shift) и похожие окна", ("tools", "games"),
+                    "no_sticky", tools=True)
+        self._check(card, "В игре включать английскую раскладку", ("tools", "games"), "english", tools=True)
+        self._check(card, "Считать игрой любое полноэкранное окно (кроме браузеров и плееров)",
+                    ("tools", "games"), "fullscreen", tools=True)
+        ttk.Label(card, text="Мои игры (если не распознаются сами)").grid(
+            row=self._next_row(card), column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self.games_list = tk.Listbox(card, height=4, bg=FIELD, fg=FG, selectbackground=ACCENT, relief="flat",
+                                     highlightthickness=0, activestyle="none")
+        self.games_list.grid(row=self._next_row(card), column=0, columnspan=3, sticky="ew", pady=3)
+        row = ttk.Frame(card, style="Card.TFrame")
+        row.grid(row=self._next_row(card), column=0, columnspan=3, sticky="w")
+        ttk.Button(row, text="+ Из запущенных…", command=self._game_add_running).pack(side="left")
+        ttk.Button(row, text="+ Файл…", command=self._game_add_file).pack(side="left", padx=6)
+        ttk.Button(row, text="Удалить", command=self._game_remove).pack(side="left")
+        self.tool_status["games"] = self._status_label(card)
+        self._hint(card, "Игры из Steam, Epic, GOG, Riot, Battle.net, Xbox, Ubisoft, EA и папок «Games» "
+                         "распознаются автоматически.")
+
+        card = self._card(page, "Интернет")
+        self._check(card, "Пинг в трее и предупреждение о потерях", ("tools", "ping"), "enabled", tools=True,
+                    style="Big.TCheckbutton")
+        row_n = self._next_row(card)
+        ttk.Label(card, text="Адрес").grid(row=row_n, column=0, sticky="w")
+        self.ping_host = tk.StringVar(value=self.cfg["tools"]["ping"]["host"])
+        ent = ttk.Entry(card, textvariable=self.ping_host, width=24)
+        ent.grid(row=row_n, column=1, sticky="w", pady=3)
+        ttk.Label(card, text="1.1.1.1, 8.8.8.8 или сервер игры", style="Hint.TLabel").grid(
+            row=row_n, column=2, sticky="e")
+        ent.bind("<FocusOut>", lambda _e: self._ping_host_changed())
+        ent.bind("<Return>", lambda _e: self._ping_host_changed())
+        self._slider(card, "Предупреждать, если пинг выше", ("tools", "ping"), "warn_ms", 30, 500,
+                     lambda v: f"{v:.0f} мс", step=10, tools=True)
+        self._slider(card, "…или потери выше", ("tools", "ping"), "warn_loss", 1, 50,
+                     lambda v: f"{v:.0f}%", tools=True)
+        self.tool_status["ping"] = self._status_label(card)
+
+        sub = ttk.Labelframe(card, text=" Выключить после загрузки ", padding=(8, 4))
+        sub.grid(row=self._next_row(card), column=0, columnspan=3, sticky="ew", pady=(8, 2))
+        sub.columnconfigure(1, weight=1)
+        ttk.Label(sub, text="Действие").grid(row=0, column=0, sticky="w")
+        self.dl_action = tk.StringVar()
+        self._dl_actions = {"sleep": "Сон", "hibernate": "Гибернация", "shutdown": "Выключение"}
+        box = ttk.Combobox(sub, textvariable=self.dl_action, state="readonly", values=list(self._dl_actions.values()),
+                           width=16)
+        box.grid(row=0, column=1, sticky="w", pady=3)
+        box.bind("<<ComboboxSelected>>", lambda _e: self._dl_action_picked())
+        self._slider(sub, "Загрузка закончилась, когда скорость ниже", ("tools", "download"), "kbps", 50, 5000,
+                     lambda v: f"{v:.0f} КБ/с", step=50)
+        self._slider(sub, "…в течение", ("tools", "download"), "minutes", 1, 15, lambda v: f"{v:.0f} мин")
+        self.dl_btn = ttk.Button(sub, text="Запустить ожидание", style="Accent.TButton", command=self._dl_toggle)
+        self.dl_btn.grid(row=self._next_row(sub), column=0, sticky="w", pady=4)
+        self.tool_status["download"] = self._status_label(sub)
+
+        card = self._card(page, "Окна")
+        self._check(card, "Включить", ("tools", "windows"), "enabled", tools=True, style="Big.TCheckbutton")
+        self._hotkey_entry(card, "Поверх всех", ("tools", "windows"), "topmost_hotkey")
+        self._hotkey_entry(card, "Прозрачнее", ("tools", "windows"), "fade_more")
+        self._hotkey_entry(card, "Плотнее", ("tools", "windows"), "fade_less")
+        self.tool_status["windows"] = self._status_label(card)
+        self._hint(card, "Действует на активное окно: закрепите видео или чат поверх игры и сделайте "
+                         "полупрозрачным. Окна, запущенные от администратора, Windows менять не даёт.")
+
+        card = self._card(page, "Не засыпать")
+        self._check(card, "Компьютер не уходит в сон (загрузки, фильмы, презентации)", ("tools", "awake"),
+                    "enabled", tools=True, style="Big.TCheckbutton")
+        self._check(card, "И экран не гаснет", ("tools", "awake"), "display", tools=True)
+        self.tool_status["awake"] = self._status_label(card)
+
+    def _ping_host_changed(self):
+        host = self.ping_host.get().strip()
+        if host and host != self.cfg["tools"]["ping"]["host"]:
+            self.cfg["tools"]["ping"]["host"] = host
+            self.app.settings_changed(tools=True)
+
+    def _dl_action_picked(self):
+        label = self.dl_action.get()
+        self.cfg["tools"]["download"]["action"] = next((k for k, v in self._dl_actions.items() if v == label),
+                                                       "sleep")
+        self.app.settings_changed()
+
+    def _dl_toggle(self):
+        if self.app.download_active:
+            self.app.cancel_download_watch()
+        else:
+            self.app.start_download_watch()
+        self.refresh_tool("download")
+
+    def _game_add_running(self):
+        from .tools import winapi
+
+        progs = winapi.visible_programs()
+        if not progs:
+            messagebox.showinfo(APP_NAME, "Не нашёл запущенных программ с окнами.", parent=self.root)
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Выберите игру")
+        win.configure(bg=BG)
+        win.geometry("520x360")
+        lb = tk.Listbox(win, bg=FIELD, fg=FG, selectbackground=ACCENT, relief="flat", highlightthickness=0)
+        lb.pack(fill="both", expand=True, padx=8, pady=8)
+        for exe, title in progs:
+            lb.insert("end", f"{exe}   —   {title[:50]}")
+
+        def add():
+            sel = lb.curselection()
+            if sel:
+                exe = progs[sel[0]][0]
+                games = self.cfg["tools"]["games"]["list"]
+                if exe not in games:
+                    games.append(exe)
+                    self.app.settings_changed(tools=True)
+                    self._refresh_games()
+            win.destroy()
+
+        lb.bind("<Double-Button-1>", lambda _e: add())
+        ttk.Button(win, text="Добавить", style="Accent.TButton", command=add).pack(pady=(0, 8))
+
+    def _game_add_file(self):
+        path = filedialog.askopenfilename(parent=self.root, title="Исполняемый файл игры",
+                                          filetypes=[("Программы", "*.exe"), ("Все файлы", "*.*")])
+        if path:
+            exe = os.path.basename(path).lower()
+            games = self.cfg["tools"]["games"]["list"]
+            if exe not in games:
+                games.append(exe)
+                self.app.settings_changed(tools=True)
+                self._refresh_games()
+
+    def _game_remove(self):
+        sel = self.games_list.curselection()
+        if sel:
+            del self.cfg["tools"]["games"]["list"][sel[0]]
+            self.app.settings_changed(tools=True)
+            self._refresh_games()
+
+    def _refresh_games(self):
+        self.games_list.delete(0, "end")
+        for exe in self.cfg["tools"]["games"]["list"]:
+            self.games_list.insert("end", exe)
+
+    def refresh_tool(self, key: str):
+        """Обновить строку состояния инструмента (вызывается по событию инструмента)."""
+        lbl = self.tool_status.get(key)
+        if lbl is None:
+            return
+        if key == "download":
+            d = self.app.tools.download
+            active = self.app.download_active
+            self.dl_btn.configure(text="Отменить" if active else "Запустить ожидание")
+            text = d.status() if d is not None else ""
+            lbl.configure(text=text, foreground=WARN if d is not None and d.state == "countdown" else
+                          (GOOD if active else MUTED_FG))
+            return
+        tool = self.app.tools.get(key)
+        text = tool.status() if tool is not None and tool.running else ""
+        enabled = self.cfg["tools"].get(key, {}).get("enabled")
+        if enabled and not text:
+            text = "Работает" if key != "ping" else "Замеряю…"
+        bad = any(w in text for w in ("нет ответа", "не удалось", "Ошибка"))
+        lbl.configure(text=text if enabled else "Выключено",
+                      foreground=(WARN if bad else GOOD) if enabled else MUTED_FG)
+
     # ================================================================ вкладка «Настройки»
     def _tab_settings(self):
         page = self._page("Настройки")
@@ -1006,6 +1201,11 @@ class MainWindow:
     def refresh(self):
         """Синхронизирует виджеты с конфигом (после смены профиля, из трея и т.п.)."""
         self.cfg = self.app.cfg
+        self._refresh_games()
+        self.ping_host.set(self.cfg["tools"]["ping"]["host"])
+        self.dl_action.set(self._dl_actions.get(self.cfg["tools"]["download"]["action"], "Сон"))
+        for key in self.tool_status:
+            self.refresh_tool(key)
         self.profile_box.configure(values=list(self.cfg["profiles"]))
         self.profile_var.set(self.cfg["active_profile"])
         self.autostart_var.set(self.app.autostart_enabled)
