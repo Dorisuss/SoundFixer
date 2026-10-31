@@ -21,7 +21,7 @@ DEFAULT_PROFILE = "Основной"
 EQ_BANDS = (60, 230, 910, 3600, 12000)  # Гц
 
 DEFAULTS: dict = {
-    "version": 2,
+    "version": 3,
     "active_profile": DEFAULT_PROFILE,
     "profiles": {DEFAULT_PROFILE: {"input_id": None, "output_id": None}},
     # Следить за устройствами по умолчанию и возвращать их (подключение гарнитуры,
@@ -30,15 +30,18 @@ DEFAULTS: dict = {
     # Виртуальные кабели (имя playback-устройства, например "CABLE Input (VB-Audio Virtual Cable)")
     "virtual_mic": "",
     "virtual_spk": "",
-    "block_size": 480,  # сэмплов при 48 кГц: 480 = 10 мс
+    "block_size": 480,  # сэмплов при 48 кГц: 480 = 10 мс (кадр нейросети шумоподавления)
     "notifications": True,
     "mic": {
         "enabled": False,          # обработка микрофона (через виртуальный кабель)
         "set_virtual_default": True,  # делать виртуальный микрофон устройством Windows по умолчанию
         "gain": 100,               # % (100 = без изменений, до 1000)
         "hpf": True,               # срез низкого гула
-        "gate": True,
-        "gate_db": -50,
+        "denoise": "ai",           # off | gate (простой порог) | ai (нейросеть RNNoise + умный гейт)
+        "denoise_strength": 100,   # сила ИИ-шумоподавления, %
+        "noise_learn": True,       # использовать запомненный профиль шума
+        "noise_profile": None,     # что программа запомнила о вашем окружении
+        "gate_db": -50,            # порог простого шумодава
         "compressor": True,
         "preset": "normal",
         "pitch": 0.0,              # полутона
@@ -67,18 +70,23 @@ DEFAULTS: dict = {
         "night": False,            # компрессор: тихое громче, громкое тише
     },
     "tts": {
-        "voice": "",
+        "engine": "sapi",          # sapi — голоса Windows (офлайн) | edge — нейроголоса Microsoft (интернет)
+        "voice": "",               # голос Windows
+        "edge_voice": "ru-RU-SvetlanaNeural",
         "rate": 0,                 # -10..10
-        "volume": 100,
+        "pitch": 0,                # -10..10
+        "volume": 100,             # %, до 200
         "through_fx": False,       # пропускать озвучку через эффекты голоса
         "monitor": True,           # слышать озвучку самому
+        "repeat_hotkey": "",       # повторить последнюю фразу
         "history": [],
     },
     "soundboard": {
         "volume": 80,
         "monitor": True,
         "stop_hotkey": "ctrl+alt+s",
-        "sounds": [],              # [{"path": ..., "name": ..., "hotkey": ...}]
+        "exclusive": True,         # повторное нажатие перезапускает звук, а не накладывает
+        "sounds": [],              # [{"path": ... | "text": ..., "name": ..., "hotkey": ...}]
     },
 }
 
@@ -107,12 +115,17 @@ def _merge(base: dict, data: dict) -> dict:
     return out
 
 
-def _migrate_v1(data: dict) -> dict:
-    """Конфиг первой версии: input_device_id / output_device_id / start_with_windows."""
-    if "version" in data:
-        return data
-    profile = {"input_id": data.get("input_device_id"), "output_id": data.get("output_device_id")}
-    return {"version": 2, "profiles": {DEFAULT_PROFILE: profile}, "active_profile": DEFAULT_PROFILE}
+def _migrate(data: dict) -> dict:
+    """Конфиг первой версии (input_device_id/output_device_id) и версии 2 (mic.gate)."""
+    if "version" not in data:
+        profile = {"input_id": data.get("input_device_id"), "output_id": data.get("output_device_id")}
+        return {"version": 3, "profiles": {DEFAULT_PROFILE: profile}, "active_profile": DEFAULT_PROFILE}
+    mic = data.get("mic")
+    if isinstance(mic, dict) and "denoise" not in mic and "gate" in mic:
+        mic["denoise"] = "ai" if mic.get("gate") else "off"
+    if data.get("block_size") not in (480, 960):
+        data["block_size"] = 480
+    return data
 
 
 def load() -> dict:
@@ -127,7 +140,7 @@ def load() -> dict:
         log.warning("Не удалось прочитать конфиг (%s), используются значения по умолчанию", err)
         return copy.deepcopy(DEFAULTS)
 
-    cfg = _merge(DEFAULTS, _migrate_v1(data))
+    cfg = _merge(DEFAULTS, _migrate(data))
     profiles = cfg.get("profiles")
     if not isinstance(profiles, dict) or not profiles:
         profiles = {DEFAULT_PROFILE: {"input_id": None, "output_id": None}}
@@ -138,8 +151,22 @@ def load() -> dict:
     } or {DEFAULT_PROFILE: {"input_id": None, "output_id": None}}
     if cfg["active_profile"] not in cfg["profiles"]:
         cfg["active_profile"] = next(iter(cfg["profiles"]))
+    try:
+        cfg["spk"]["eq"] = [float(g) for g in cfg["spk"]["eq"]]
+    except (TypeError, ValueError):
+        cfg["spk"]["eq"] = []
     if len(cfg["spk"]["eq"]) != len(EQ_BANDS):
         cfg["spk"]["eq"] = [0.0] * len(EQ_BANDS)
+    if cfg["mic"]["denoise"] not in ("off", "gate", "ai"):
+        cfg["mic"]["denoise"] = "ai"
+    if cfg["tts"]["engine"] not in ("sapi", "edge"):
+        cfg["tts"]["engine"] = "sapi"
+    if not isinstance(cfg["mic"]["noise_profile"], dict):
+        cfg["mic"]["noise_profile"] = None
+    cfg["soundboard"]["sounds"] = [
+        s for s in cfg["soundboard"]["sounds"]
+        if isinstance(s, dict) and (isinstance(s.get("path"), str) or isinstance(s.get("text"), str))
+    ]
     return cfg
 
 

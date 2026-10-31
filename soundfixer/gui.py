@@ -15,7 +15,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from . import APP_NAME, __version__, config
 from .config import EQ_BANDS
 from .hotkeys import PTT_KEYS, parse as parse_hotkey
-from .presets import EQ_PRESETS, VOICE_PRESETS, voice_values
+from .presets import EDGE_VOICES, EQ_PRESETS, VOICE_PRESETS, voice_values
 
 BG = "#17181c"
 PANEL = "#202228"
@@ -28,6 +28,15 @@ WARN = "#f0b429"
 BAD = "#eb4848"
 
 VB_CABLE_URL = "https://vb-audio.com/Cable/"
+DENOISE_MODES = {
+    "ai": "ИИ — нейросеть RNNoise (рекомендуется)",
+    "gate": "Простое — глушить всё тише порога",
+    "off": "Выключено",
+}
+TTS_ENGINES = {
+    "sapi": "Голоса Windows (без интернета)",
+    "edge": "Нейроголоса Microsoft (естественные, нужен интернет)",
+}
 
 
 def pct_label(p: float) -> str:
@@ -163,6 +172,12 @@ class MainWindow:
 
     def _next_row(self, parent) -> int:
         return parent.grid_size()[1]
+
+    def _slot(self, parent) -> ttk.Frame:
+        """Строка-контейнер для виджетов, которые то показываются, то скрываются."""
+        box = ttk.Frame(parent, style="Card.TFrame")
+        box.grid(row=self._next_row(parent), column=0, columnspan=3, sticky="ew")
+        return box
 
     def _check(self, parent, text, section, key, devices=False, hotkeys=False, style="TCheckbutton", cmd=None,
                sync=False):
@@ -356,18 +371,47 @@ class MainWindow:
     def _tab_mic(self):
         page = self.mic_page = self._page("Микрофон")
         card = self._card(page, "Обработка микрофона")
-        self.mic_enabled = self._check(card, "Включить (громкость > 100%, шумодав, смена голоса, озвучка)",
+        self.mic_enabled = self._check(card, "Включить (шумодав, громкость > 100%, эффекты, озвучка)",
                                        "mic", "enabled", devices=True, style="Big.TCheckbutton")
         self.mic_status = self._status_label(card)
         self.mic_meter = self._meter(card, "Уровень входа")
         self.mute_btn = ttk.Button(card, text="Выключить микрофон", command=self.app.toggle_mute)
         self.mute_btn.grid(row=self._next_row(card), column=0, sticky="w", pady=4)
 
+        # ---------- шумоподавление
+        card = self.dn_card = self._card(page, "Шумоподавление")
+        ttk.Label(card, text="Режим").grid(row=0, column=0, sticky="w")
+        self.dn_var = tk.StringVar()
+        box = ttk.Combobox(card, textvariable=self.dn_var, state="readonly", values=list(DENOISE_MODES.values()))
+        box.grid(row=0, column=1, columnspan=2, sticky="ew", pady=3)
+        box.bind("<<ComboboxSelected>>", lambda _e: self._denoise_picked())
+        self.dn_status = self._status_label(card)
+        box = self._slot(card)
+        self.dn_install = ttk.Button(box, text="Установить ИИ-шумоподавление (pyrnnoise, ~14 МБ)",
+                                     style="Accent.TButton", command=self._install_denoise)
+        self.dn_strength = self._slider(card, "Сила подавления", "mic", "denoise_strength", 0, 100,
+                                        lambda v: f"{v:.0f}%", step=5)
+        self.vad_meter = self._meter(card, "Голос (по мнению ИИ)")
+        self._slider(card, "Порог (простой режим)", "mic", "gate_db", -80, -20, lambda v: f"{v:.0f} дБ")
+
+        sub = ttk.Frame(card, style="Card.TFrame")
+        sub.grid(row=self._next_row(card), column=0, columnspan=3, sticky="ew", pady=(8, 2))
+        self.learn_btn = ttk.Button(sub, text="Запомнить мой шум (10 с)", command=self._learn_start)
+        self.learn_btn.pack(side="left")
+        self.learn_cancel = ttk.Button(sub, text="Отмена", command=self._learn_cancel)
+        ttk.Button(sub, text="Забыть", command=self._learn_forget).pack(side="right")
+        self.learn_bar = ttk.Progressbar(self._slot(card), mode="determinate", maximum=1.0)
+        self.learn_lbl = self._status_label(card)
+        self._check(card, "Использовать запомненный шум", "mic", "noise_learn")
+        self._hint(card, "ИИ — нейросеть RNNoise: оставляет голос и убирает вентилятор, улицу, клавиатуру, "
+                         "клики и шорохи. Задержка 20 мс. «Запомнить мой шум»: 10 секунд молчите и шумите как "
+                         "обычно (печатайте, кликайте, двигайтесь) — программа выучит именно ваши звуки, "
+                         "поднимет порог голоса настолько, насколько их нужно отсекать, и будет глушить их "
+                         "между фразами. Профиль сохраняется.")
+
         card = self._card(page, "Громкость и чистота")
         self._slider(card, "Громкость", "mic", "gain", 0, 1000, pct_label, step=5)
         self._check(card, "Убирать низкий гул (фильтр < 90 Гц)", "mic", "hpf")
-        self._check(card, "Шумодав (тишина, когда вы молчите)", "mic", "gate")
-        self._slider(card, "Порог шумодава", "mic", "gate_db", -80, -20, lambda v: f"{v:.0f} дБ")
         self._check(card, "Выравнивать громкость (компрессор)", "mic", "compressor")
         self._hint(card, "Двойной клик по ползунку — сброс к значению по умолчанию.")
 
@@ -393,7 +437,8 @@ class MainWindow:
         }
 
         card = self._card(page, "Слышать себя")
-        self._check(card, "Выводить свой голос в наушники (проверка эффектов)", "mic", "monitor", devices=True)
+        self._check(card, "Выводить свой голос в наушники (проверка эффектов и шумодава)", "mic", "monitor",
+                    devices=True)
         self._slider(card, "Громкость контроля", "mic", "monitor_volume", 0, 100, lambda v: f"{v:.0f}%")
 
         card = self._card(page, "Выключение микрофона")
@@ -416,6 +461,77 @@ class MainWindow:
         ptt.bind("<FocusOut>", ptt_changed)
         self._hint(card, "Без обработки микрофона кнопка выключает сам микрофон в Windows, с обработкой — "
                          "выключает его мгновенно внутри SoundFixer. Подходят и боковые кнопки мыши (mouse4/5).")
+
+    def _denoise_picked(self):
+        label = self.dn_var.get()
+        self.cfg["mic"]["denoise"] = next((k for k, v in DENOISE_MODES.items() if v == label), "ai")
+        self.app.settings_changed(devices=True)
+        self.refresh_status()
+
+    def _install_denoise(self):
+        self.dn_install.configure(state="disabled", text="Устанавливаю… (до минуты)")
+
+        def done(ok, out):
+            self.dn_install.configure(state="normal", text="Установить ИИ-шумоподавление (pyrnnoise, ~14 МБ)")
+            if ok:
+                self.app.report("denoise", "Установлено, запускаю нейросеть…", None)
+                self.app.reload_denoise()
+            else:
+                self.app.report("denoise", "Не удалось установить: " + out.strip().splitlines()[-1][:200]
+                                if out.strip() else "Не удалось установить", False)
+
+        self.app.install_package(["--no-deps", "pyrnnoise"], done)
+
+    # ---------- обучение на шуме
+    def _learn_start(self):
+        err = self.app.start_noise_learning()
+        if err:
+            self.learn_lbl.configure(text=err, foreground=WARN)
+            return
+        self.learn_btn.configure(state="disabled")
+        self.learn_cancel.pack(side="left", padx=6)
+        self.learn_bar.pack(fill="x", pady=4)
+        self.learn_bar["value"] = 0
+        self.learn_lbl.configure(text="Слушаю… Молчите и шумите как обычно: печатайте, кликайте мышью, "
+                                      "двигайтесь, скрипите стулом.", foreground=ACCENT)
+        self.root.after(100, self._learn_poll)
+
+    def _learn_poll(self):
+        p = self.app.learning_progress()
+        if p is None:
+            self._learn_ui_done()
+            return
+        self.learn_bar["value"] = p
+        if p >= 1.0 and self.app.finish_learning(self._learn_result):
+            self.learn_lbl.configure(text="Анализирую…", foreground=ACCENT)
+            return
+        self.root.after(100, self._learn_poll)
+
+    def _learn_result(self, data, text):
+        self._learn_ui_done()
+        if data is None:
+            self.learn_lbl.configure(text=f"Не получилось: {text}", foreground=WARN)
+            return
+        self.cfg["mic"]["noise_profile"] = data
+        self.cfg["mic"]["noise_learn"] = True
+        self.app.settings_changed()
+        self._refresh_vars()
+        self.learn_lbl.configure(text="✔ " + text, foreground=GOOD)
+
+    def _learn_cancel(self):
+        self.app.cancel_learning()
+        self._learn_ui_done()
+        self.learn_lbl.configure(text="Обучение отменено", foreground=MUTED_FG)
+
+    def _learn_ui_done(self):
+        self.learn_btn.configure(state="normal")
+        self.learn_cancel.pack_forget()
+        self.learn_bar.pack_forget()
+
+    def _learn_forget(self):
+        self.cfg["mic"]["noise_profile"] = None
+        self.app.settings_changed()
+        self.learn_lbl.configure(text="Запомненный шум удалён", foreground=MUTED_FG)
 
     def _preset_picked(self):
         label = self.preset_var.get()
@@ -502,53 +618,78 @@ class MainWindow:
     # ================================================================ вкладка «Озвучка и звуки»
     def _tab_speech(self):
         page = self._page("Озвучка и звуки")
-        card = self._card(page, "Озвучка текста в микрофон")
-        self.tts_text = tk.Text(card, height=4, wrap="word", bg=FIELD, fg=FG, insertbackground=FG,
+        card = self._card(page, "Состояние")
+        self.route_lbl = self._status_label(card)
+        self.speech_status = self._status_label(card)
+
+        card = self._card(page, "Озвучка текста")
+        self.tts_text = tk.Text(card, height=3, wrap="word", bg=FIELD, fg=FG, insertbackground=FG,
                                 relief="flat", font=("Segoe UI", 10), padx=6, pady=4,
                                 highlightthickness=1, highlightbackground=FIELD, highlightcolor=ACCENT)
         self.tts_text.grid(row=0, column=0, columnspan=3, sticky="ew", pady=3)
         self.tts_text.bind("<Control-Return>", lambda _e: (self._speak(), "break")[1])
+        self.tts_text.bind("<Return>", lambda _e: (self._speak(), "break")[1])
+        self.tts_text.bind("<Shift-Return>", lambda _e: None)
         row = ttk.Frame(card, style="Card.TFrame")
         row.grid(row=1, column=0, columnspan=3, sticky="ew")
-        ttk.Button(row, text="Сказать  (Ctrl+Enter)", style="Accent.TButton", command=self._speak).pack(side="left")
-        ttk.Button(row, text="Стоп", command=self.app.stop_sounds).pack(side="left", padx=6)
+        ttk.Button(row, text="Сказать  (Enter)", style="Accent.TButton", command=self._speak).pack(side="left")
+        ttk.Button(row, text="Повторить последнее", command=self.app.repeat_last).pack(side="left", padx=6)
+        ttk.Button(row, text="Стоп", command=self.app.stop_sounds).pack(side="left")
 
-        ttk.Label(card, text="Голос").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        self.voice_var = tk.StringVar(value=self.cfg["tts"]["voice"] or "по умолчанию")
-        self.voice_box = ttk.Combobox(card, textvariable=self.voice_var, state="readonly")
-        self.voice_box.grid(row=2, column=1, columnspan=2, sticky="ew", pady=(8, 3))
+        ttk.Label(card, text="Движок").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.engine_var = tk.StringVar()
+        eng_box = ttk.Combobox(card, textvariable=self.engine_var, state="readonly", values=list(TTS_ENGINES.values()))
+        eng_box.grid(row=2, column=1, columnspan=2, sticky="ew", pady=(8, 3))
+        eng_box.bind("<<ComboboxSelected>>", lambda _e: self._engine_picked())
+        ttk.Label(card, text="Голос").grid(row=3, column=0, sticky="w")
+        vrow = ttk.Frame(card, style="Card.TFrame")
+        vrow.grid(row=3, column=1, columnspan=2, sticky="ew", pady=3)
+        vrow.columnconfigure(0, weight=1)
+        self.voice_var = tk.StringVar()
+        self.voice_box = ttk.Combobox(vrow, textvariable=self.voice_var, state="readonly")
+        self.voice_box.grid(row=0, column=0, sticky="ew")
         self.voice_box.bind("<<ComboboxSelected>>", lambda _e: self._voice_picked())
-        self.voice_box.bind("<Button-1>", lambda _e: self._load_voices(), add="+")
+        self.voices_btn = ttk.Button(vrow, text="Обновить", command=self._load_voices)
+        self.voices_btn.grid(row=0, column=1, padx=(6, 0))
+        self.edge_install = ttk.Button(self._slot(card), text="Установить нейроголоса (edge-tts)",
+                                       style="Accent.TButton", command=self._install_edge)
         self._slider(card, "Скорость", "tts", "rate", -10, 10, lambda v: f"{v:+.0f}")
-        self._slider(card, "Громкость", "tts", "volume", 0, 100, lambda v: f"{v:.0f}%")
-        self._check(card, "Пропускать через эффекты голоса", "tts", "through_fx")
-        self._check(card, "Слышать озвучку в наушниках", "tts", "monitor", devices=True)
+        self._slider(card, "Высота", "tts", "pitch", -10, 10, lambda v: f"{v:+.0f}")
+        self._slider(card, "Громкость", "tts", "volume", 0, 200, lambda v: f"{v:.0f}%", step=5)
+        self._check(card, "Пропускать через эффекты голоса (робот, эхо…)", "tts", "through_fx")
+        self._check(card, "Слышать озвучку в наушниках", "tts", "monitor")
+        self._hotkey_entry(card, "Повторить последнее", "tts", "repeat_hotkey")
 
-        ttk.Label(card, text="Недавние фразы (двойной клик — повторить)").grid(
+        ttk.Label(card, text="Недавние фразы (двойной клик — сказать ещё раз)").grid(
             row=self._next_row(card), column=0, columnspan=3, sticky="w", pady=(8, 0))
-        self.history = tk.Listbox(card, height=4, bg=FIELD, fg=FG, selectbackground=ACCENT, relief="flat",
+        self.history = tk.Listbox(card, height=5, bg=FIELD, fg=FG, selectbackground=ACCENT, relief="flat",
                                   highlightthickness=0, activestyle="none")
         self.history.grid(row=self._next_row(card), column=0, columnspan=3, sticky="ew", pady=3)
         self.history.bind("<Double-Button-1>", lambda _e: self._replay())
+        hrow = ttk.Frame(card, style="Card.TFrame")
+        hrow.grid(row=self._next_row(card), column=0, columnspan=3, sticky="w")
+        ttk.Button(hrow, text="В быстрые фразы", command=self._history_to_board).pack(side="left")
+        ttk.Button(hrow, text="Очистить историю", command=self._clear_history).pack(side="left", padx=6)
 
-        card = self._card(page, "Саундборд (звуки в микрофон)")
-        self.sounds_list = tk.Listbox(card, height=6, bg=FIELD, fg=FG, selectbackground=ACCENT, relief="flat",
+        card = self._card(page, "Саундборд и быстрые фразы")
+        self.sounds_list = tk.Listbox(card, height=7, bg=FIELD, fg=FG, selectbackground=ACCENT, relief="flat",
                                       highlightthickness=0, activestyle="none")
         self.sounds_list.grid(row=0, column=0, columnspan=3, sticky="ew", pady=3)
         self.sounds_list.bind("<Double-Button-1>", lambda _e: self._play_selected())
         row = ttk.Frame(card, style="Card.TFrame")
         row.grid(row=1, column=0, columnspan=3, sticky="ew")
         ttk.Button(row, text="▶ Играть", style="Accent.TButton", command=self._play_selected).pack(side="left")
-        ttk.Button(row, text="Добавить…", command=self._add_sounds).pack(side="left", padx=4)
-        ttk.Button(row, text="Клавиша…", command=self._sound_hotkey).pack(side="left", padx=4)
-        ttk.Button(row, text="Удалить", command=self._remove_sound).pack(side="left", padx=4)
-        ttk.Button(row, text="Стоп", command=self.app.stop_sounds).pack(side="left", padx=4)
+        ttk.Button(row, text="+ Звук…", command=self._add_sounds).pack(side="left", padx=(6, 0))
+        ttk.Button(row, text="+ Фраза…", command=self._add_phrase).pack(side="left", padx=(6, 0))
+        ttk.Button(row, text="Клавиша…", command=self._sound_hotkey).pack(side="left", padx=(6, 0))
+        ttk.Button(row, text="Имя…", command=self._rename_sound).pack(side="left", padx=(6, 0))
+        ttk.Button(row, text="Удалить", command=self._remove_sound).pack(side="left", padx=(6, 0))
         self._slider(card, "Громкость", "soundboard", "volume", 0, 200, lambda v: f"{v:.0f}%", step=5)
-        self._check(card, "Слышать звуки в наушниках", "soundboard", "monitor", devices=True)
+        self._check(card, "Слышать звуки в наушниках", "soundboard", "monitor")
+        self._check(card, "Повторное нажатие перезапускает звук (не накладывать)", "soundboard", "exclusive")
         self._hotkey_entry(card, "Остановить все звуки", "soundboard", "stop_hotkey")
-        self._hint(card, "Форматы: mp3, wav, ogg, flac. Звуки загружаются в память один раз и "
-                         "играют мгновенно.")
-        self.speech_status = self._status_label(card)
+        self._hint(card, "Звуки: mp3, wav, ogg, flac — загружаются в память один раз и играют мгновенно. "
+                         "Быстрые фразы озвучиваются выбранным голосом и тоже запоминаются.")
 
     def _speak(self):
         text = self.tts_text.get("1.0", "end").strip()
@@ -560,23 +701,94 @@ class MainWindow:
     def _replay(self):
         sel = self.history.curselection()
         if sel:
-            self.app.speak(self.history.get(sel[0]))
+            self.app.speak(self.cfg["tts"]["history"][sel[0]])
+            self._refresh_lists()
+
+    def _history_to_board(self):
+        sel = self.history.curselection()
+        if not sel:
+            messagebox.showinfo(APP_NAME, "Выберите фразу в списке недавних.", parent=self.root)
+            return
+        text = self.cfg["tts"]["history"][sel[0]]
+        self.cfg["soundboard"]["sounds"].append({"text": text, "name": text[:40], "hotkey": ""})
+        self.app.settings_changed()
+        self._refresh_lists()
+
+    def _clear_history(self):
+        self.cfg["tts"]["history"] = []
+        self.app.settings_changed()
+        self._refresh_lists()
+
+    # ---------- голоса
+    def _engine_picked(self):
+        label = self.engine_var.get()
+        self.cfg["tts"]["engine"] = next((k for k, v in TTS_ENGINES.items() if v == label), "sapi")
+        self.app.settings_changed()
+        self._fill_voices()
+
+    def _fill_voices(self, items=None):
+        tts = self.cfg["tts"]
+        if tts["engine"] == "edge":
+            self._voice_items = items or getattr(self, "_edge_items", None) or list(EDGE_VOICES)
+            self._edge_items = self._voice_items
+            current = tts["edge_voice"]
+            if current not in dict(self._voice_items):
+                self._voice_items = [(current, current)] + self._voice_items
+            self.voices_btn.configure(text="Все голоса")
+        else:
+            self._voice_items = [("", "по умолчанию")] + (items or getattr(self, "_sapi_items", []))
+            if items:
+                self._sapi_items = items
+            current = tts["voice"]
+            if current and current not in dict(self._voice_items):
+                self._voice_items.append((current, current))
+            self.voices_btn.configure(text="Обновить")
+        labels = dict(self._voice_items)
+        self.voice_box.configure(values=[lbl for _, lbl in self._voice_items])
+        self.voice_var.set(labels.get(current, current or "по умолчанию"))
+        need_edge = tts["engine"] == "edge" and not self.app.edge_available()
+        if need_edge:
+            self.edge_install.pack(anchor="w", pady=4)
+        else:
+            self.edge_install.pack_forget()
 
     def _load_voices(self):
-        if getattr(self, "_voices_loaded", False):
-            return
-        self._voices_loaded = True
+        engine = self.cfg["tts"]["engine"]
+        self.voices_btn.configure(state="disabled")
 
-        def done(voices):
-            self.voice_box.configure(values=["по умолчанию"] + voices)
+        def done(items, err):
+            self.voices_btn.configure(state="normal")
+            if items is None:
+                self.app.report("speech", f"Голоса: {err}", False)
+                return
+            if engine == self.cfg["tts"]["engine"]:
+                self._fill_voices(items)
+                self.app.report("speech", f"Голосов найдено: {len(items)}", True)
 
-        self.app.list_voices(done)
+        self.app.list_voices(engine, done)
 
     def _voice_picked(self):
-        v = self.voice_var.get()
-        self.cfg["tts"]["voice"] = "" if v == "по умолчанию" else v
+        label = self.voice_var.get()
+        vid = next((i for i, lbl in self._voice_items if lbl == label), "")
+        key = "edge_voice" if self.cfg["tts"]["engine"] == "edge" else "voice"
+        self.cfg["tts"][key] = vid
         self.app.settings_changed()
 
+    def _install_edge(self):
+        self.edge_install.configure(state="disabled", text="Устанавливаю…")
+
+        def done(ok, out):
+            self.edge_install.configure(state="normal", text="Установить нейроголоса (edge-tts)")
+            if ok:
+                self.app.report("speech", "Нейроголоса установлены", True)
+            else:
+                self.app.report("speech", "Не удалось установить edge-tts: "
+                                + (out.strip().splitlines()[-1][:200] if out.strip() else ""), False)
+            self._fill_voices()
+
+        self.app.install_package(["edge-tts"], done)
+
+    # ---------- саундборд
     def _add_sounds(self):
         paths = filedialog.askopenfilenames(
             parent=self.root, title="Добавить звуки",
@@ -588,20 +800,43 @@ class MainWindow:
             self.app.settings_changed()
             self._refresh_lists()
 
+    def _add_phrase(self):
+        text = simpledialog.askstring(APP_NAME, "Текст быстрой фразы (будет озвучен выбранным голосом):",
+                                      parent=self.root)
+        if text and text.strip():
+            text = text.strip()
+            self.cfg["soundboard"]["sounds"].append({"text": text, "name": text[:40], "hotkey": ""})
+            self.app.settings_changed()
+            self._refresh_lists()
+
     def _selected_sound(self):
         sel = self.sounds_list.curselection()
         return sel[0] if sel else None
 
     def _play_selected(self):
         i = self._selected_sound()
-        if i is not None:
-            self.app.play_sound(i)
+        if i is None:
+            if self.cfg["soundboard"]["sounds"]:
+                self.app.report("speech", "Выберите звук в списке", None)
+            return
+        self.app.play_sound(i)
 
     def _remove_sound(self):
         i = self._selected_sound()
         if i is not None:
             del self.cfg["soundboard"]["sounds"][i]
             self.app.settings_changed(hotkeys=True)
+            self._refresh_lists()
+
+    def _rename_sound(self):
+        i = self._selected_sound()
+        if i is None:
+            return
+        snd = self.cfg["soundboard"]["sounds"][i]
+        name = simpledialog.askstring(APP_NAME, "Название:", initialvalue=snd.get("name", ""), parent=self.root)
+        if name and name.strip():
+            snd["name"] = name.strip()
+            self.app.settings_changed()
             self._refresh_lists()
 
     def _sound_hotkey(self):
@@ -625,10 +860,16 @@ class MainWindow:
     # ================================================================ вкладка «Настройки»
     def _tab_settings(self):
         page = self._page("Настройки")
+        card = self._card(page, "Проверка звука")
+        self._hint(card, "Если что-то не звучит — запустите проверку: она проверит устройства, вывод в "
+                         "наушники (короткий писк), микрофон, нейросеть шумоподавления и голоса озвучки.", row=0)
+        self.diag_btn = ttk.Button(card, text="Проверить всё", style="Accent.TButton", command=self._diagnostics)
+        self.diag_btn.grid(row=1, column=0, sticky="w", pady=4)
+
         card = self._card(page, "Виртуальные кабели")
-        self._hint(card, "Чтобы собеседники слышали обработанный голос, а звук системы можно было усилить "
-                         "выше 100%, нужен виртуальный аудиокабель (бесплатный VB-Audio Virtual Cable). "
-                         "Для микрофона и наушников одновременно нужны два кабеля (например, VB-Cable и "
+        self._hint(card, "Чтобы собеседники слышали обработанный голос, озвучку и звуки, а звук системы можно "
+                         "было усилить выше 100%, нужен виртуальный аудиокабель (бесплатный VB-Audio Virtual "
+                         "Cable). Для микрофона и наушников одновременно нужны два кабеля (например, VB-Cable и "
                          "VB-Cable A/B, или VoiceMeeter).", row=0)
         ttk.Label(card, text="Кабель для микрофона").grid(row=1, column=0, sticky="w", pady=(6, 0))
         self.vmic_var = tk.StringVar()
@@ -653,13 +894,13 @@ class MainWindow:
         card = self._card(page, "Производительность")
         ttk.Label(card, text="Размер буфера").grid(row=0, column=0, sticky="w")
         self.block_var = tk.StringVar()
-        self._blocks = {"256 (5 мс, минимальная задержка)": 256, "480 (10 мс, рекомендуется)": 480,
-                        "960 (20 мс, для слабых ПК)": 960}
+        self._blocks = {"480 (10 мс, рекомендуется)": 480, "960 (20 мс, для слабых ПК)": 960}
         box = ttk.Combobox(card, textvariable=self.block_var, state="readonly", values=list(self._blocks))
         box.grid(row=0, column=1, columnspan=2, sticky="ew", pady=3)
         box.bind("<<ComboboxSelected>>", lambda _e: self._block_picked())
         self._hint(card, "Обработка звука включается только по требованию: без неё программа не загружает "
-                         "звуковой движок вообще и почти не занимает памяти и CPU.")
+                         "звуковой движок вообще и почти не занимает памяти и CPU. Выход в наушники для "
+                         "озвучки и звуков открывается при воспроизведении и закрывается после простоя.")
 
         card = self._card(page, "О программе")
         ttk.Label(card, text=f"{APP_NAME} {__version__}").grid(row=0, column=0, sticky="w")
@@ -669,6 +910,38 @@ class MainWindow:
                    command=lambda: os.startfile(config.CONFIG_DIR) if hasattr(os, "startfile") else None).pack(
             side="left")
         ttk.Button(row, text="Выход из программы", command=self.app.quit).pack(side="left", padx=6)
+
+    def _diagnostics(self):
+        self.diag_btn.configure(state="disabled", text="Проверяю… (несколько секунд)")
+
+        def done(text):
+            self.diag_btn.configure(state="normal", text="Проверить всё")
+            win = tk.Toplevel(self.root)
+            win.title("Проверка звука — SoundFixer")
+            win.configure(bg=BG)
+            win.geometry("620x420")
+            txt = tk.Text(win, wrap="word", bg=FIELD, fg=FG, relief="flat", font=("Segoe UI", 10), padx=10, pady=8)
+            txt.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+            txt.insert("1.0", text)
+            txt.tag_configure("bad", foreground=BAD)
+            txt.tag_configure("good", foreground=GOOD)
+            for i, line in enumerate(text.splitlines(), start=1):
+                if line.startswith("✖"):
+                    txt.tag_add("bad", f"{i}.0", f"{i}.end")
+                elif line.startswith("✔"):
+                    txt.tag_add("good", f"{i}.0", f"{i}.1")
+            txt.configure(state="disabled")
+            row = ttk.Frame(win)
+            row.pack(fill="x", padx=8, pady=(0, 8))
+
+            def copy_text():
+                self.root.clipboard_clear()
+                self.root.clipboard_append(text)
+
+            ttk.Button(row, text="Копировать", command=copy_text).pack(side="left")
+            ttk.Button(row, text="Закрыть", command=win.destroy).pack(side="right")
+
+        self.app.run_diagnostics(done)
 
     def _virtual_picked(self, kind, key):
         var = self.vmic_var if kind == "vmic" else self.vspk_var
@@ -752,7 +1025,10 @@ class MainWindow:
                 var.set(self.cfg["spk"]["eq"][i])
             self.ptt_var.set(self.cfg["mic"]["ptt_key"])
             self.block_var.set(next((k for k, v in self._blocks.items() if v == self.cfg["block_size"]),
-                                    list(self._blocks)[1]))
+                                    list(self._blocks)[0]))
+            self.dn_var.set(DENOISE_MODES.get(self.cfg["mic"]["denoise"], DENOISE_MODES["ai"]))
+            self.engine_var.set(TTS_ENGINES.get(self.cfg["tts"]["engine"], TTS_ENGINES["sapi"]))
+            self._fill_voices()
             self._refresh_combos()
         finally:
             self._updating = False
@@ -768,8 +1044,17 @@ class MainWindow:
         self.sounds_list.delete(0, "end")
         for s in self.cfg["soundboard"]["sounds"]:
             hk = f"   [{s['hotkey']}]" if s.get("hotkey") else ""
-            missing = "" if os.path.exists(s["path"]) else "   (файл не найден)"
-            self.sounds_list.insert("end", f"{s.get('name') or os.path.basename(s['path'])}{hk}{missing}")
+            if s.get("text"):
+                self.sounds_list.insert("end", f"💬 {s.get('name') or s['text'][:40]}{hk}")
+            else:
+                missing = "" if os.path.exists(s["path"]) else "   (файл не найден)"
+                self.sounds_list.insert("end", f"♪ {s.get('name') or os.path.basename(s['path'])}{hk}{missing}")
+        prof = self.cfg["mic"]["noise_profile"]
+        if prof and not self.learn_lbl.cget("text"):
+            import time as _t
+
+            when = _t.strftime("%d.%m.%Y %H:%M", _t.localtime(prof.get("created", 0)))
+            self.learn_lbl.configure(text=f"Запомнен {when}. {prof.get('summary', '')}", foreground=MUTED_FG)
 
     def refresh_status(self):
         st = self.app.status
@@ -785,8 +1070,8 @@ class MainWindow:
         paint(self.mic_status, st.get("mic", ""), self.cfg["mic"]["enabled"])
         paint(self.spk_status, st.get("spk", ""), self.cfg["spk"]["enabled"])
         self.mute_btn.configure(text="Включить микрофон" if self.app.muted else "Выключить микрофон")
-        eng = self.app.engine
-        self.speech_status.configure(text="" if eng is not None and eng.mic_running else st.get("mic", ""))
+        self._refresh_denoise_status()
+        self._refresh_speech_status()
         if self.root.state() != "withdrawn":
             self._start_meters()
         bar = f"Профиль: {self.cfg['active_profile']}"
@@ -798,6 +1083,56 @@ class MainWindow:
         if hk:
             bar += f"   •   занятые клавиши: {', '.join(hk)}"
         self.status_bar.configure(text=bar, foreground=BAD if self.app.muted else MUTED_FG)
+
+    def _refresh_denoise_status(self):
+        mic = self.cfg["mic"]
+        mode = mic["denoise"]
+        eng = self.app.engine
+        ok = self.app.status_ok.get("denoise")
+        show_install = False
+        if mode == "ai":
+            dn = eng.mic_chain.denoiser if eng is not None else None
+            if ok is False and dn is None:
+                text, color = self.app.status.get("denoise") or "ИИ-шумоподавление недоступно", BAD
+                show_install = not getattr(sys, "frozen", False)
+                if mic["enabled"]:
+                    text += " — пока работает простой шумодав"
+            elif not mic["enabled"]:
+                text, color = "Нейросеть включится вместе с обработкой микрофона", MUTED_FG
+            elif dn is not None:
+                prof = " • учитывает ваш шум" if mic["noise_learn"] and mic["noise_profile"] else ""
+                text = (f"Нейросеть работает • задержка 20 мс • обработка {eng.proc_ms:.1f} мс на блок 10 мс"
+                        f"{prof}")
+                color = GOOD
+            else:
+                text, color = self.app.status.get("denoise") or "Запуск нейросети…", MUTED_FG
+        elif mode == "gate":
+            text, color = "Простой шумодав: глушит всё, что тише порога (без ИИ)", MUTED_FG
+        else:
+            text, color = "Шумоподавление выключено", MUTED_FG
+        self.dn_status.configure(text=text, foreground=color)
+        if show_install:
+            self.dn_install.pack(anchor="w", pady=4)
+        else:
+            self.dn_install.pack_forget()
+
+    def _refresh_speech_status(self):
+        eng = self.app.engine
+        mic_on = eng is not None and eng.mic_running
+        cable = eng is not None and eng.cable_running
+        if mic_on and cable:
+            route, color = ("Озвучку и звуки слышат собеседники (через виртуальный микрофон) и вы — "
+                            "если включено «Слышать…»."), GOOD
+        elif mic_on:
+            route, color = ("Озвучку и звуки слышите только вы: виртуальный кабель не выбран "
+                            "(вкладка «Настройки»)."), WARN
+        else:
+            route, color = ("Озвучку и звуки слышите вы в наушниках. Чтобы их слышали собеседники — включите "
+                            "«Обработку микрофона» на вкладке «Микрофон» и виртуальный кабель."), WARN
+        self.route_lbl.configure(text=route, foreground=color)
+        text = self.app.status.get("speech", "")
+        ok = self.app.status_ok.get("speech")
+        self.speech_status.configure(text=text, foreground=GOOD if ok else (BAD if ok is False else FG))
 
     # ================================================================ показ/скрытие, индикаторы
     def show(self):
@@ -832,9 +1167,20 @@ class MainWindow:
             return  # индикаторы нужны только на вкладках «Микрофон»/«Наушники»
         if tab == 1:
             self._draw_meter(self.mic_meter, eng.mic_level if eng.mic_running else 0.0)
+            dn = eng.mic_chain.denoiser if eng.mic_running else None
+            self._draw_vad(dn.vad if dn is not None else 0.0, dn is not None and dn.open)
+            self._ticks = getattr(self, "_ticks", 0) + 1
+            if self._ticks % 10 == 0:
+                self._refresh_denoise_status()
         else:
             self._draw_meter(self.spk_meter, eng.spk_level if eng.spk_running else 0.0)
         self._meter_job = self.root.after(50, self._tick)
+
+    def _draw_vad(self, vad: float, open_: bool):
+        c = self.vad_meter
+        w = c.winfo_width()
+        c.coords(c.bar, 0, 0, int(w * max(0.0, min(1.0, vad))), 12)
+        c.itemconfigure(c.bar, fill=GOOD if open_ else MUTED_FG)
 
     @staticmethod
     def _draw_meter(canvas, level):

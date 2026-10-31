@@ -3,7 +3,12 @@ pycaw>=20240316
 comtypes>=1.4.8
 pystray>=0.19.5
 Pillow>=10.0.0
-# Обработка звука (загружается только когда включена)
+# Обработка звука (загружается только когда нужна)
 numpy>=1.26
 sounddevice>=0.5.0
 pedalboard>=0.9.12
+# Нейроголоса Microsoft для озвучки (нужен интернет)
+edge-tts>=7.0
+# ИИ-шумоподавление RNNoise ставится отдельно и без зависимостей
+# (иначе pip потянет ненужные matplotlib/audiolab):
+#   python -m pip install --no-deps pyrnnoise

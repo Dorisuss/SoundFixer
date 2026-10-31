@@ -18,8 +18,8 @@ log = logging.getLogger(__name__)
 
 
 class Worker(threading.Thread):
-    def __init__(self):
-        super().__init__(name="SoundFixer-control", daemon=True)
+    def __init__(self, name: str = "SoundFixer-control"):
+        super().__init__(name=name, daemon=True)
         self._cv = threading.Condition()
         self._heap: list = []  # (when, seq, key, fn, future)
         self._keys: dict = {}  # key -> seq актуальной задачи

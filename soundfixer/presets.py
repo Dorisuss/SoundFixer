@@ -40,3 +40,26 @@ def voice_values(key: str) -> dict | None:
     vals = dict(VOICE_DEFAULTS)
     vals.update(diff)
     return vals
+
+
+# Популярные нейроголоса; полный список загружается кнопкой «Все голоса»
+EDGE_VOICES = [
+    ("ru-RU-SvetlanaNeural", "Светлана — русский, женский"),
+    ("ru-RU-DmitryNeural", "Дмитрий — русский, мужской"),
+    ("uk-UA-PolinaNeural", "Поліна — украинский, женский"),
+    ("uk-UA-OstapNeural", "Остап — украинский, мужской"),
+    ("kk-KZ-AigulNeural", "Айгуль — казахский, женский"),
+    ("kk-KZ-DauletNeural", "Даулет — казахский, мужской"),
+    ("en-US-AndrewMultilingualNeural", "Andrew — многоязычный (говорит и по-русски), мужской"),
+    ("en-US-AvaMultilingualNeural", "Ava — многоязычный (говорит и по-русски), женский"),
+    ("en-US-BrianMultilingualNeural", "Brian — многоязычный, мужской"),
+    ("en-US-EmmaMultilingualNeural", "Emma — многоязычный, женский"),
+    ("en-US-GuyNeural", "Guy — английский (США), мужской"),
+    ("en-US-JennyNeural", "Jenny — английский (США), женский"),
+    ("en-US-AnaNeural", "Ana — английский (США), детский"),
+    ("en-GB-RyanNeural", "Ryan — английский (Британия), мужской"),
+    ("en-GB-SoniaNeural", "Sonia — английский (Британия), женский"),
+    ("de-DE-ConradNeural", "Conrad — немецкий, мужской"),
+    ("de-DE-KatjaNeural", "Katja — немецкий, женский"),
+    ("ja-JP-NanamiNeural", "Nanami — японский, женский"),
+]

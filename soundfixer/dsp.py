@@ -182,7 +182,7 @@ class _Chain:
 
 
 class MicChain(_Chain):
-    """Микрофон (моно): срез гула → шумодав → голосовые эффекты → компрессор → усиление → лимитер."""
+    """Микрофон (моно): ИИ-шумодав → срез гула → голосовые эффекты → компрессор → усиление → лимитер."""
 
     def __init__(self):
         super().__init__()
@@ -192,11 +192,25 @@ class MicChain(_Chain):
         self.post = Pedalboard()
         self.p: dict = {}
         self.use_pitch = self.use_robot = False
+        self.denoiser = None          # denoise.Denoiser, если включён ИИ-режим
+        self.denoise_error = ""
+        self._profile_key = None
+        self._profile = None
 
     @staticmethod
-    def _signature(c):
+    def _mode(c) -> str:
+        mode = c.get("denoise", "off")
+        if mode == "ai":
+            from . import denoise
+
+            # библиотеку загружает поток управления; пока её нет — работает простой шумодав
+            if not denoise.library_ready():
+                return "gate"
+        return mode
+
+    def _signature(self, c):
         return (
-            c.get("hpf"), c.get("gate"), c.get("radio"), c.get("compressor"),
+            c.get("hpf"), self._mode(c), c.get("radio"), c.get("compressor"),
             c.get("pitch", 0) != 0, c.get("robot", 0) > 0, c.get("distortion", 0) > 0,
             c.get("chorus", 0) > 0, c.get("echo", 0) > 0, c.get("reverb", 0) > 0,
             c.get("gain", 100) != 100,
@@ -204,10 +218,29 @@ class MicChain(_Chain):
 
     def _build(self, c):
         p = self.p = {}
+        mode = self._mode(c)
+        if mode == "ai":
+            if self.denoiser is None:
+                from . import denoise
+
+                try:
+                    self.denoiser = denoise.Denoiser(denoise.load_library())
+                    self.denoise_error = ""
+                except Exception as err:  # noqa: BLE001
+                    self.denoise_error = str(err)
+                    mode = "gate"
+        elif self.denoiser is not None:
+            self.denoiser.close()
+            self.denoiser = None
+            self._profile_key = None
+        if c.get("denoise") == "ai" and mode != "ai" and not self.denoise_error:
+            from . import denoise
+
+            self.denoise_error = denoise.library_error() or "нейросеть загружается…"
         pre = []
         if c.get("hpf"):
             pre.append(HighpassFilter(90))
-        if c.get("gate"):
+        if mode == "gate":
             p["gate"] = NoiseGate(threshold_db=-50, ratio=12, attack_ms=1, release_ms=180)
             pre.append(p["gate"])
         post = []
@@ -239,6 +272,16 @@ class MicChain(_Chain):
         p = self.p
         if "gate" in p:
             p["gate"].threshold_db = float(c.get("gate_db", -50))
+        if self.denoiser is not None:
+            prof_data = c.get("noise_profile") if c.get("noise_learn") else None
+            key = (prof_data or {}).get("created")
+            if key != self._profile_key:
+                from .denoise import NoiseProfile
+
+                self._profile_key = key
+                self._profile = NoiseProfile(prof_data) if prof_data else None
+            self.denoiser.configure(c.get("denoise_strength", 100) / 100.0, True,
+                                    self._profile if prof_data else None)
         st = float(c.get("pitch", 0))
         self.use_pitch = st != 0
         self.pitch.set_semitones(st)
@@ -266,7 +309,10 @@ class MicChain(_Chain):
         """x — моно float32, возвращает новый массив той же длины."""
         self._apply_pending()
         n = len(x)
-        y = self.pre.process(x.reshape(1, n), SAMPLE_RATE, reset=False)[0] if len(self.pre) else x
+        if self.denoiser is not None:
+            x = self.denoiser.process(x)
+        y = self.pre.process(np.ascontiguousarray(x, np.float32).reshape(1, n), SAMPLE_RATE,
+                             reset=False)[0] if len(self.pre) else x
         if self.use_pitch:
             y = self.pitch.process(y)
         if self.use_robot:
@@ -347,48 +393,103 @@ class SpeakerChain(_Chain):
 
 
 # --------------------------------------------------------------------------- микшер
+FADE = 480  # 10 мс плавного затухания при остановке — без щелчка
+
+
+class Clip:
+    __slots__ = ("data", "pos", "gain", "to_mic", "through_fx", "monitor", "tag", "fade_at")
+
+    def __init__(self, data, pos, gain, to_mic, through_fx, monitor, tag):
+        self.data = data
+        self.pos = pos            # < 0 — клип ждёт своей очереди (фразы озвучки идут по порядку)
+        self.gain = gain
+        self.to_mic = to_mic
+        self.through_fx = through_fx
+        self.monitor = monitor
+        self.tag = tag
+        self.fade_at = -1         # индекс начала затухания (после stop)
+
+
 class ClipMixer:
-    """Подмешивает озвучку текста и звуки саундборда в микрофон (и в наушники для контроля)."""
+    """Подмешивает озвучку и звуки саундборда в виртуальный микрофон и/или в наушники.
+
+    render() вызывается ровно в одном месте: в колбэке микрофона, если обработка микрофона
+    работает (тогда собеседники и вы слышите звук синхронно), иначе — в колбэке наушников
+    (monitor_only: звук слышите только вы).
+    """
 
     def __init__(self):
-        self._clips: list[list] = []  # [data, pos, gain, through_fx, monitor]
+        self._clips: list[Clip] = []
         self._lock = threading.Lock()
+        self._ramp = np.linspace(1.0, 0.0, FADE, dtype=np.float32)
 
     @property
     def busy(self) -> bool:
         return bool(self._clips)
 
-    def play(self, data: np.ndarray, gain: float = 1.0, through_fx: bool = False, monitor: bool = True) -> None:
+    def play(self, data: np.ndarray, gain: float = 1.0, *, to_mic: bool = True, through_fx: bool = False,
+             monitor: bool = True, tag: str | None = None, exclusive: bool = False, queue: bool = False) -> None:
         with self._lock:
-            self._clips.append([data, 0, float(gain), through_fx, monitor])
+            if exclusive and tag:
+                self._fade_locked(tag)
+            pos = 0
+            if queue and tag:  # дождаться окончания предыдущих клипов с тем же тегом
+                pending = [len(c.data) - c.pos for c in self._clips if c.tag == tag and c.fade_at < 0]
+                pos = -max(pending, default=0)
+            self._clips.append(Clip(data, pos, float(gain), to_mic, through_fx, monitor, tag))
 
-    def stop(self) -> None:
+    def stop(self, tag: str | None = None) -> None:
         with self._lock:
-            self._clips.clear()
+            self._fade_locked(tag)
 
-    def render(self, n: int):
+    def _fade_locked(self, tag) -> None:
+        alive = []
+        for c in self._clips:
+            if tag is None or c.tag == tag:
+                if c.pos < 0:
+                    continue  # ещё не начался — просто убираем
+                if c.fade_at < 0:
+                    c.fade_at = c.pos
+                    c.data = c.data[:c.pos + FADE]
+            alive.append(c)
+        self._clips = alive
+
+    def render(self, n: int, monitor_only: bool = False):
         """→ (pre_fx, post_fx, monitor) — массивы длины n или None."""
         if not self._clips:
             return None, None, None
         pre = post = mon = None
         with self._lock:
             alive = []
-            for clip in self._clips:
-                data, pos, gain, through_fx, monitor = clip
-                chunk = data[pos:pos + n]
+            for c in self._clips:
+                pos = c.pos
+                c.pos = pos + n
+                if pos + n <= 0:  # ждёт очереди
+                    alive.append(c)
+                    continue
+                off = -pos if pos < 0 else 0
+                start = max(pos, 0)
+                chunk = c.data[start:start + n - off]
                 m = len(chunk)
                 if m:
                     seg = np.zeros(n, np.float32)
-                    seg[:m] = chunk * gain
-                    if through_fx:
-                        pre = seg if pre is None else pre + seg
+                    seg[off:off + m] = chunk
+                    seg *= c.gain
+                    if c.fade_at >= 0:
+                        idx = np.arange(start, start + m) - c.fade_at
+                        seg[off:off + m] *= self._ramp[np.clip(idx, 0, FADE - 1)]
+                    if monitor_only:
+                        mon = seg if mon is None else mon + seg
                     else:
-                        post = seg if post is None else post + seg
-                    if monitor:
-                        mon = seg.copy() if mon is None else mon + seg
-                clip[1] = pos + n
-                if clip[1] < len(data):
-                    alive.append(clip)
+                        if c.to_mic:
+                            if c.through_fx:
+                                pre = seg if pre is None else pre + seg
+                            else:
+                                post = seg if post is None else post + seg
+                        if c.monitor:
+                            mon = seg.copy() if mon is None else mon + seg
+                if c.pos < len(c.data):
+                    alive.append(c)
             self._clips = alive
         return pre, post, mon
 
