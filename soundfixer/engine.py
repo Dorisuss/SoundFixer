@@ -80,6 +80,7 @@ class Engine:
         self.mic_level = 0.0
         self.spk_level = 0.0
         self.proc_ms = 0.0            # среднее время обработки блока микрофона
+        self._rec = None              # [исходный, обработанный, позиция] — тест «как меня слышат»
         self.last_activity = time.monotonic()
         self.monitor_device: str | None = None
         self._mic_in = None
@@ -204,6 +205,7 @@ class Engine:
             pre, post, mon = self.mixer.render(frames)
             if pre is not None:
                 x += pre
+            raw = x.copy() if self._rec is not None else None
             v = self.mic_chain.process(x)
             if self.muted:
                 v = np.zeros(frames, np.float32)
@@ -211,6 +213,13 @@ class Engine:
             np.clip(y, -1.0, 1.0, out=y)
             if self._cable_ring is not None:
                 self._cable_ring.write(y.reshape(-1, 1))
+            rec = self._rec
+            if rec is not None and raw is not None:
+                pos = rec[2]
+                m = min(frames, len(rec[0]) - pos)
+                rec[0][pos:pos + m] = raw[:m]
+                rec[1][pos:pos + m] = y[:m]
+                rec[2] = pos + m
             ring = self._mon_ring
             if ring is not None:
                 m = v * self.monitor_gain if self.monitor_voice else None
@@ -225,6 +234,27 @@ class Engine:
             self.proc_ms += (dt - self.proc_ms) * 0.05
         except Exception:  # noqa: BLE001
             self._log_once("mic")
+
+    # ---------------------------------------------------------------- тест «как меня слышат»
+    def start_recording(self, seconds: float = 6.0) -> None:
+        n = int(SAMPLE_RATE * seconds)
+        self._rec = [np.zeros(n, np.float32), np.zeros(n, np.float32), 0]
+
+    @property
+    def recording_progress(self) -> float | None:
+        rec = self._rec
+        return None if rec is None else rec[2] / len(rec[0])
+
+    def take_recording(self):
+        """→ (исходный звук, то, что слышат другие) после окончания записи, иначе None."""
+        rec = self._rec
+        if rec is None or rec[2] < len(rec[0]):
+            return None
+        self._rec = None
+        return rec[0], rec[1]
+
+    def cancel_recording(self) -> None:
+        self._rec = None
 
     def stop_mic(self) -> None:
         self._mic_active = False

@@ -45,7 +45,7 @@ class App:
         self.inputs: list[Device] = []
         self.outputs: list[Device] = []
         self.defaults: dict[int, str | None] = {RENDER: None, CAPTURE: None}
-        self.status = {"mic": "", "spk": "", "devices": "", "speech": "", "denoise": ""}
+        self.status = {"mic": "", "spk": "", "devices": "", "speech": "", "denoise": "", "tips": ""}
         self.status_ok: dict[str, bool | None] = {}
         self.muted = False
         self.ptt_down = False
@@ -462,6 +462,37 @@ class App:
         self.worker.submit(job)
         return True
 
+    # ---------------------------------------------------------------- тест «как меня слышат»
+    def start_voice_check(self, seconds: float = 6.0) -> str | None:
+        eng = self.engine
+        if eng is None or not eng.mic_running:
+            return "Сначала включите «Обработку микрофона»."
+        eng.start_recording(seconds)
+        return None
+
+    def voice_check_progress(self) -> float | None:
+        eng = self.engine
+        return eng.recording_progress if eng is not None else None
+
+    def finish_voice_check(self) -> bool:
+        eng = self.engine
+        rec = eng.take_recording() if eng is not None else None
+        if rec is None:
+            return False
+        self._voice_check = rec
+        return True
+
+    def play_voice_check(self, processed: bool) -> None:
+        rec = getattr(self, "_voice_check", None)
+        if rec is None:
+            return
+        data = rec[1] if processed else rec[0]
+        peak = float(abs(data).max()) or 1.0
+        gain = min(4.0, 0.7 / peak)  # тихую запись делаем слышнее, громкую не перегружаем
+        what = "Как слышат другие" if processed else "Без обработки"
+        self.worker.submit(lambda: self._w_play_clip(data, what, gain=gain, through_fx=False, monitor=True,
+                                                     tag="voicecheck", exclusive=True, to_mic=False))
+
     # ---------------------------------------------------------------- установка пакетов
     def install_package(self, args: list[str], done) -> None:
         """pip install в фоне (для запуска из исходников) → done(успех, вывод)."""
@@ -687,10 +718,10 @@ class App:
         return dev.name if dev else None
 
     def _w_play_clip(self, data, what: str, *, gain: float, through_fx: bool, monitor: bool, tag: str,
-                     exclusive: bool = False, queue: bool = False) -> None:
+                     exclusive: bool = False, queue: bool = False, to_mic: bool = True) -> None:
         try:
             eng = self._w_get_engine()
-            to_others = eng.mic_running and eng.cable_running
+            to_others = to_mic and eng.mic_running and eng.cable_running
             need_monitor = monitor or not to_others
             if need_monitor:
                 target = self._w_monitor_target()
@@ -701,7 +732,9 @@ class App:
                            tag=tag, exclusive=exclusive, queue=queue)
             self._w_schedule_idle()
             secs = len(data) / 48000
-            if to_others:
+            if not to_mic:  # проверка «как меня слышат» — специально только в наушники
+                self.ui(self.report, "speech", f"▶ {what} ({secs:.1f} с) — в наушниках", True)
+            elif to_others:
                 who = "собеседники и вы" if need_monitor else "собеседники"
                 self.ui(self.report, "speech", f"▶ {what} ({secs:.1f} с) — слышат {who}", True)
             else:
@@ -755,6 +788,7 @@ class App:
         mic_status = spk_status = ""
         want_mic = want_spk = None
         mic_cable_capture = ""
+        self._w_check_tips(snap, mic_dev)
         if mic_on:
             cable, cable_capture = self._virtual_pair(snap["virtual_mic"], outs, ins) if snap["virtual_mic"] \
                 else (None, None)
@@ -843,6 +877,17 @@ class App:
         if eng is not None and eng.spk_running and not spk_status:
             spk_status = f"Работает — звук идёт в: {want_spk[1]}"
         self.ui(self._set_engine_status, mic_status, spk_status)
+
+    def _w_check_tips(self, snap: dict, mic_dev) -> None:
+        """Подсказки о двойной обработке: «улучшения звука» Windows искажают голос вместе с нейросетью."""
+        tip = ""
+        if mic_dev is not None and snap["mic"]["enabled"] and snap["mic"]["denoise"] == "ai" and self.audio:
+            if self.audio.enhancements_enabled(mic_dev.id):
+                tip = (f"Для «{mic_dev.name}» в Windows включены «Улучшения звука» (шумодав/эффекты драйвера, "
+                       f"Voice Clarity). Вместе с нейросетью они могут искажать голос — выключите: "
+                       f"Параметры → Система → Звук → микрофон → Улучшения звука → Выкл.")
+        if tip != self.status.get("tips"):
+            self.ui(self.report, "tips", tip, None)
 
     def _w_prepare_denoise(self, snap: dict) -> None:
         """Создать выбранную нейросеть шумодава (до секунды — здесь, а не в аудиопотоке)
@@ -941,6 +986,11 @@ class App:
             add(bool(ins and outs), f"Устройства: микрофонов {len(ins)}, выходов {len(outs)}")
             add(None, f"Сейчас в Windows: микрофон «{names.get(a.default_id(CAPTURE) or '', '—')}», "
                       f"звук «{names.get(a.default_id(RENDER) or '', '—')}»")
+            mic_id = (snap["profiles"][snap["active_profile"]]["input_id"] or a.default_id(CAPTURE) or "")
+            enh = a.enhancements_enabled(mic_id) if mic_id else None
+            if enh is not None:
+                add(None if enh else True, "«Улучшения звука» Windows для микрофона: " + (
+                    "включены — с нейросетью шумодава лучше выключить" if enh else "выключены"))
             virt = [d.name for d in outs if d.is_virtual]
             add(bool(virt) or None, "Виртуальные кабели: " + (", ".join(virt) if virt else
                                                               "не найдены (нужны для эффектов и озвучки собеседникам)"))

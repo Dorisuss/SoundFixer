@@ -428,6 +428,29 @@ class MainWindow:
         self.learn_bar = ttk.Progressbar(self._slot(card), mode="determinate", maximum=1.0)
         self.learn_lbl = self._status_label(card)
         self._check(card, "Использовать запомненный шум", "mic", "noise_learn")
+
+        ttk.Label(card, text="Как меня слышат (сравните нейросети на своей клавиатуре)").grid(
+            row=self._next_row(card), column=0, columnspan=3, sticky="w", pady=(10, 0))
+        sub = ttk.Frame(card, style="Card.TFrame")
+        sub.grid(row=self._next_row(card), column=0, columnspan=3, sticky="ew", pady=(4, 2))
+        self.check_btn = ttk.Button(sub, text="● Записать 6 с", command=self._check_start)
+        self.check_btn.pack(side="left")
+        self.play_proc_btn = ttk.Button(sub, text="▶ Как слышат другие", state="disabled",
+                                        command=lambda: self.app.play_voice_check(True))
+        self.play_proc_btn.pack(side="left", padx=6)
+        self.play_raw_btn = ttk.Button(sub, text="▶ Без обработки", state="disabled",
+                                       command=lambda: self.app.play_voice_check(False))
+        self.play_raw_btn.pack(side="left")
+        self.check_bar = ttk.Progressbar(self._slot(card), mode="determinate", maximum=1.0)
+        self.check_lbl = self._status_label(card)
+
+        tipbox = self._slot(card)
+        self.tip_lbl = ttk.Label(tipbox, style="Hint.TLabel", wraplength=560, justify="left", foreground=WARN)
+        self.tip_btn = ttk.Button(tipbox, text="Открыть настройки звука Windows",
+                                  command=lambda: os.startfile("ms-settings:sound") if hasattr(os, "startfile") else None)
+        self._hint(card, "Если голос всё равно звучит странно, проверьте двойную обработку: в Discord выключите "
+                         "«Шумоподавление» (Krisp) и «Автоматическую регулировку усиления», в Windows — «Улучшения "
+                         "звука» микрофона. Две нейросети подряд портят голос сильнее, чем одна.")
         self._hint(card, "DeepFilterNet3 оставляет голос и убирает клавиатуру, клики, вентилятор, улицу — "
                          "и не «рвёт» речь, когда вы говорите и печатаете одновременно (с этим плохо "
                          "справляется RNNoise). «Запомнить мой шум»: 10 секунд молчите и шумите как обычно — "
@@ -512,6 +535,36 @@ class MainWindow:
                                 if out.strip() else "Не удалось установить", False)
 
         self.app.install_package(["--no-deps", "pyrnnoise"], done)
+
+    # ---------- тест «как меня слышат»
+    def _check_start(self):
+        err = self.app.start_voice_check(6.0)
+        if err:
+            self.check_lbl.configure(text=err, foreground=WARN)
+            return
+        self.check_btn.configure(state="disabled")
+        self.check_bar.pack(fill="x", pady=4)
+        self.check_bar["value"] = 0
+        self.check_lbl.configure(text="Записываю… Говорите и печатайте как обычно.", foreground=ACCENT)
+        self.root.after(100, self._check_poll)
+
+    def _check_poll(self):
+        p = self.app.voice_check_progress()
+        if p is not None and p < 1.0:
+            self.check_bar["value"] = p
+            self.root.after(100, self._check_poll)
+            return
+        self.check_bar.pack_forget()
+        self.check_btn.configure(state="normal")
+        if p is not None and self.app.finish_voice_check():
+            self.play_proc_btn.configure(state="normal")
+            self.play_raw_btn.configure(state="normal")
+            self.check_lbl.configure(text="Готово. Послушайте в наушниках, как вас слышат другие, и сравните с "
+                                          "исходным звуком. Можно переключить нейросеть и записать ещё раз.",
+                                     foreground=GOOD)
+            self.app.play_voice_check(True)
+        else:
+            self.check_lbl.configure(text="Запись прервалась (обработка микрофона выключилась?)", foreground=WARN)
 
     # ---------- обучение на шуме
     def _learn_start(self):
@@ -1341,6 +1394,14 @@ class MainWindow:
         else:
             text, color = "Шумоподавление выключено", MUTED_FG
         self.dn_status.configure(text=text, foreground=color)
+        tip = self.app.status.get("tips") or ""
+        if tip:
+            self.tip_lbl.configure(text=tip)
+            self.tip_lbl.pack(anchor="w", pady=(4, 2))
+            self.tip_btn.pack(anchor="w", pady=(0, 4))
+        else:
+            self.tip_lbl.pack_forget()
+            self.tip_btn.pack_forget()
         if show_install:
             self.dn_install.pack(anchor="w", pady=4)
         else:

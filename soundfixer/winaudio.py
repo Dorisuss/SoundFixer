@@ -59,6 +59,8 @@ def _pkey(fmtid: str, pid: int):
 if AVAILABLE:
     PKEY_FRIENDLY_NAME = _pkey("{a45c254e-df1c-4efd-8020-67d146a850e0}", 14)
     PKEY_INTERFACE_NAME = _pkey("{026e516e-b814-414b-83cd-856d6fef4822}", 2)
+    # 0 — «улучшения звука» включены, 1 — выключены (Параметры → Звук → устройство → Улучшения звука)
+    PKEY_DISABLE_SYSFX = _pkey("{1da5d803-d492-4edd-8c23-e0c0ffee7f0e}", 5)
 
     class _NotificationClient(MMNotificationClient):
         """Колбэки приходят из системных потоков: только передаём событие дальше."""
@@ -136,6 +138,19 @@ class WinAudio:
             return self._device(self._enum.GetDevice(device_id), flow)
         except (COMError, OSError):
             return None
+
+    def enhancements_enabled(self, device_id: str) -> bool | None:
+        """Включены ли «улучшения звука» Windows для устройства (None — неизвестно)."""
+        try:
+            store = self._enum.GetDevice(device_id).OpenPropertyStore(0)
+            pv = store.GetValue(PKEY_DISABLE_SYSFX)
+        except (COMError, OSError):
+            return None
+        try:
+            value = pv.GetValue()
+        finally:
+            pv.clear()
+        return value == 0 if isinstance(value, int) and not isinstance(value, bool) else None
 
     def default_id(self, flow: int, role: int = 0) -> str | None:
         try:
