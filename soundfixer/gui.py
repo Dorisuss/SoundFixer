@@ -29,9 +29,14 @@ BAD = "#eb4848"
 
 VB_CABLE_URL = "https://vb-audio.com/Cable/"
 DENOISE_MODES = {
-    "ai": "ИИ — нейросеть RNNoise (рекомендуется)",
+    "ai": "ИИ — нейросеть (рекомендуется)",
     "gate": "Простое — глушить всё тише порога",
     "off": "Выключено",
+}
+DENOISE_ENGINES = {
+    "dfn_ll": "DeepFilterNet3 — лучшее качество, 10 мс",
+    "dfn": "DeepFilterNet3 лёгкая — 30 мс, вдвое меньше нагрузки",
+    "rnnoise": "RNNoise — самая лёгкая, 20 мс (хуже при печати)",
 }
 TTS_ENGINES = {
     "sapi": "Голоса Windows (без интернета)",
@@ -399,9 +404,15 @@ class MainWindow:
         box = ttk.Combobox(card, textvariable=self.dn_var, state="readonly", values=list(DENOISE_MODES.values()))
         box.grid(row=0, column=1, columnspan=2, sticky="ew", pady=3)
         box.bind("<<ComboboxSelected>>", lambda _e: self._denoise_picked())
+        ttk.Label(card, text="Нейросеть").grid(row=1, column=0, sticky="w")
+        self.dn_engine_var = tk.StringVar()
+        box = ttk.Combobox(card, textvariable=self.dn_engine_var, state="readonly",
+                           values=list(DENOISE_ENGINES.values()))
+        box.grid(row=1, column=1, columnspan=2, sticky="ew", pady=3)
+        box.bind("<<ComboboxSelected>>", lambda _e: self._denoise_engine_picked())
         self.dn_status = self._status_label(card)
         box = self._slot(card)
-        self.dn_install = ttk.Button(box, text="Установить ИИ-шумоподавление (pyrnnoise, ~14 МБ)",
+        self.dn_install = ttk.Button(box, text="Установить RNNoise (pyrnnoise, ~14 МБ)",
                                      style="Accent.TButton", command=self._install_denoise)
         self.dn_strength = self._slider(card, "Сила подавления", "mic", "denoise_strength", 0, 100,
                                         lambda v: f"{v:.0f}%", step=5)
@@ -417,11 +428,11 @@ class MainWindow:
         self.learn_bar = ttk.Progressbar(self._slot(card), mode="determinate", maximum=1.0)
         self.learn_lbl = self._status_label(card)
         self._check(card, "Использовать запомненный шум", "mic", "noise_learn")
-        self._hint(card, "ИИ — нейросеть RNNoise: оставляет голос и убирает вентилятор, улицу, клавиатуру, "
-                         "клики и шорохи. Задержка 20 мс. «Запомнить мой шум»: 10 секунд молчите и шумите как "
-                         "обычно (печатайте, кликайте, двигайтесь) — программа выучит именно ваши звуки, "
-                         "поднимет порог голоса настолько, насколько их нужно отсекать, и будет глушить их "
-                         "между фразами. Профиль сохраняется.")
+        self._hint(card, "DeepFilterNet3 оставляет голос и убирает клавиатуру, клики, вентилятор, улицу — "
+                         "и не «рвёт» речь, когда вы говорите и печатаете одновременно (с этим плохо "
+                         "справляется RNNoise). «Запомнить мой шум»: 10 секунд молчите и шумите как обычно — "
+                         "порог гейта поднимется ровно выше вашего шума, и в паузах будет полная тишина. "
+                         "Профиль записывается для выбранной нейросети.")
 
         card = self._card(page, "Громкость и чистота")
         self._slider(card, "Громкость", "mic", "gain", 0, 1000, pct_label, step=5)
@@ -476,6 +487,12 @@ class MainWindow:
         self._hint(card, "Без обработки микрофона кнопка выключает сам микрофон в Windows, с обработкой — "
                          "выключает его мгновенно внутри SoundFixer. Подходят и боковые кнопки мыши (mouse4/5).")
 
+    def _denoise_engine_picked(self):
+        label = self.dn_engine_var.get()
+        self.cfg["mic"]["denoise_engine"] = next((k for k, v in DENOISE_ENGINES.items() if v == label), "dfn_ll")
+        self.app.settings_changed(devices=True)
+        self.refresh_status()
+
     def _denoise_picked(self):
         label = self.dn_var.get()
         self.cfg["mic"]["denoise"] = next((k for k, v in DENOISE_MODES.items() if v == label), "ai")
@@ -486,7 +503,7 @@ class MainWindow:
         self.dn_install.configure(state="disabled", text="Устанавливаю… (до минуты)")
 
         def done(ok, out):
-            self.dn_install.configure(state="normal", text="Установить ИИ-шумоподавление (pyrnnoise, ~14 МБ)")
+            self.dn_install.configure(state="normal", text="Установить RNNoise (pyrnnoise, ~14 МБ)")
             if ok:
                 self.app.report("denoise", "Установлено, запускаю нейросеть…", None)
                 self.app.reload_denoise()
@@ -1227,6 +1244,8 @@ class MainWindow:
             self.block_var.set(next((k for k, v in self._blocks.items() if v == self.cfg["block_size"]),
                                     list(self._blocks)[0]))
             self.dn_var.set(DENOISE_MODES.get(self.cfg["mic"]["denoise"], DENOISE_MODES["ai"]))
+            self.dn_engine_var.set(DENOISE_ENGINES.get(self.cfg["mic"]["denoise_engine"],
+                                                       DENOISE_ENGINES["dfn_ll"]))
             self.engine_var.set(TTS_ENGINES.get(self.cfg["tts"]["engine"], TTS_ENGINES["sapi"]))
             self._fill_voices()
             self._refresh_combos()
@@ -1292,20 +1311,31 @@ class MainWindow:
         show_install = False
         if mode == "ai":
             dn = eng.mic_chain.denoiser if eng is not None else None
+            note = self.app.status.get("denoise") or ""
+            info = self.app.denoise_info
             if ok is False and dn is None:
-                text, color = self.app.status.get("denoise") or "ИИ-шумоподавление недоступно", BAD
-                show_install = not getattr(sys, "frozen", False)
+                text, color = note or "ИИ-шумоподавление недоступно", BAD
+                show_install = mic["denoise_engine"] == "rnnoise" and not getattr(sys, "frozen", False)
                 if mic["enabled"]:
                     text += " — пока работает простой шумодав"
             elif not mic["enabled"]:
                 text, color = "Нейросеть включится вместе с обработкой микрофона", MUTED_FG
-            elif dn is not None:
-                prof = " • учитывает ваш шум" if mic["noise_learn"] and mic["noise_profile"] else ""
-                text = (f"Нейросеть работает • задержка 20 мс • обработка {eng.proc_ms:.1f} мс на блок 10 мс"
-                        f"{prof}")
-                color = GOOD
+            elif dn is not None and info is not None:
+                prof_data = mic["noise_profile"] if mic["noise_learn"] else None
+                prof = ""
+                if prof_data:
+                    used = "dfn" if dn.kind.startswith("dfn") else "rnnoise"
+                    prof = (" • учитывает ваш шум" if prof_data.get("backend", "rnnoise") == used
+                            else " • профиль шума записан для другой нейросети — запишите заново")
+                text = (f"{info[0]} работает • задержка {info[1]} мс • обработка {eng.proc_ms:.1f} мс "
+                        f"на блок 10 мс{prof}")
+                if eng.underruns:
+                    text += f"\nЗвук не успевал {eng.underruns} раз — запас буфера увеличен до {eng.buffer_ms:.0f} мс"
+                if note:
+                    text = note + "\n" + text
+                color = WARN if note else GOOD
             else:
-                text, color = self.app.status.get("denoise") or "Запуск нейросети…", MUTED_FG
+                text, color = note or "Запуск нейросети…", MUTED_FG
         elif mode == "gate":
             text, color = "Простой шумодав: глушит всё, что тише порога (без ИИ)", MUTED_FG
         else:

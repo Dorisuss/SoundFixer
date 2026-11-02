@@ -44,10 +44,15 @@ class Ring:
 
     Поглощает дрейф тактовой частоты: при переполнении отбрасывает старое,
     при опустошении выдаёт тишину и заново набирает запас (target).
+    Адаптивный: если звук хоть раз не успел (процессор занят, система «подвисла»),
+    запас увеличивается на один блок — до max_blocks. Задержка растёт только при необходимости.
     """
 
-    def __init__(self, channels: int, target: int, capacity: int | None = None):
+    def __init__(self, channels: int, target: int, capacity: int | None = None, max_blocks: int = 4):
         self.target = target
+        self.step = target
+        self.max_target = target * max_blocks
+        self.underruns = 0
         self.capacity = capacity or max(target * 16, 8192)
         self.buf = np.zeros((self.capacity, channels), np.float32)
         self.r = 0
@@ -83,6 +88,9 @@ class Ring:
                 self._copy_out(out[:fill], fill)
                 out[fill:] = 0
                 self.primed = False
+                self.underruns += 1
+                if self.target < self.max_target:
+                    self.target += self.step
                 return
             self._copy_out(out, n)
             if fill - n > self.target * 4:  # слишком большая задержка — догоняем
@@ -182,7 +190,13 @@ class _Chain:
 
 
 class MicChain(_Chain):
-    """Микрофон (моно): ИИ-шумодав → срез гула → голосовые эффекты → компрессор → усиление → лимитер."""
+    """Микрофон (моно): ИИ-шумодав → срез гула → голосовые эффекты → компрессор → усиление → лимитер.
+
+    Нейросеть шумодава создаёт поток управления (это занимает до секунды) и передаёт через
+    install_denoiser(); аудиопоток подхватывает её в начале блока. Старые экземпляры не
+    освобождаются в аудиопотоке — их забирает поток управления (take_retired).
+    Пока нейросеть загружается, работает простой шумодав.
+    """
 
     def __init__(self):
         super().__init__()
@@ -190,27 +204,44 @@ class MicChain(_Chain):
         self.robot = RingModulator()
         self.pre = Pedalboard()
         self.post = Pedalboard()
+        self.fallback = Pedalboard([NoiseGate(threshold_db=-50, ratio=12, attack_ms=1, release_ms=180)])
         self.p: dict = {}
         self.use_pitch = self.use_robot = False
-        self.denoiser = None          # denoise.Denoiser, если включён ИИ-режим
-        self.denoise_error = ""
+        self.denoiser = None          # denoise.Denoiser в работе (только аудиопоток меняет)
+        self._dn_pending = None       # (Denoiser | None,) от потока управления
+        self._retired: list = []
+        self._ai = False
+        self._cfg: dict = {}
         self._profile_key = None
         self._profile = None
 
+    def install_denoiser(self, dn) -> None:
+        """Поток управления: подменить нейросеть (None — убрать)."""
+        self._dn_pending = (dn,)
+
+    def take_retired(self) -> list:
+        """Поток управления: забрать заменённые нейросети, чтобы освободить их память."""
+        out = []
+        while self._retired:
+            out.append(self._retired.pop())
+        return out
+
+    def _swap_denoiser(self) -> None:
+        pending = self._dn_pending
+        if pending is None:
+            return
+        self._dn_pending = None
+        if self.denoiser is not None:
+            self._retired.append(self.denoiser)
+        self.denoiser = pending[0]
+        self._profile_key = None
+        if self.denoiser is not None:
+            self._configure_denoiser(self._cfg)
+
     @staticmethod
-    def _mode(c) -> str:
-        mode = c.get("denoise", "off")
-        if mode == "ai":
-            from . import denoise
-
-            # библиотеку загружает поток управления; пока её нет — работает простой шумодав
-            if not denoise.library_ready():
-                return "gate"
-        return mode
-
-    def _signature(self, c):
+    def _signature(c):
         return (
-            c.get("hpf"), self._mode(c), c.get("radio"), c.get("compressor"),
+            c.get("hpf"), c.get("denoise", "off"), c.get("radio"), c.get("compressor"),
             c.get("pitch", 0) != 0, c.get("robot", 0) > 0, c.get("distortion", 0) > 0,
             c.get("chorus", 0) > 0, c.get("echo", 0) > 0, c.get("reverb", 0) > 0,
             c.get("gain", 100) != 100,
@@ -218,25 +249,8 @@ class MicChain(_Chain):
 
     def _build(self, c):
         p = self.p = {}
-        mode = self._mode(c)
-        if mode == "ai":
-            if self.denoiser is None:
-                from . import denoise
-
-                try:
-                    self.denoiser = denoise.Denoiser(denoise.load_library())
-                    self.denoise_error = ""
-                except Exception as err:  # noqa: BLE001
-                    self.denoise_error = str(err)
-                    mode = "gate"
-        elif self.denoiser is not None:
-            self.denoiser.close()
-            self.denoiser = None
-            self._profile_key = None
-        if c.get("denoise") == "ai" and mode != "ai" and not self.denoise_error:
-            from . import denoise
-
-            self.denoise_error = denoise.library_error() or "нейросеть загружается…"
+        mode = c.get("denoise", "off")
+        self._ai = mode == "ai"
         pre = []
         if c.get("hpf"):
             pre.append(HighpassFilter(90))
@@ -268,20 +282,25 @@ class MicChain(_Chain):
         self.pre = Pedalboard(pre)
         self.post = Pedalboard(post)
 
+    def _configure_denoiser(self, c) -> None:
+        dn = self.denoiser
+        if dn is None or not c:
+            return
+        prof_data = c.get("noise_profile") if c.get("noise_learn") else None
+        key = (prof_data or {}).get("created")
+        if key != self._profile_key:
+            from .denoise import NoiseProfile
+
+            self._profile_key = key
+            self._profile = NoiseProfile(prof_data) if prof_data else None
+        dn.configure(c.get("denoise_strength", 100) / 100.0, True, self._profile if prof_data else None)
+
     def _update(self, c):
         p = self.p
+        self._cfg = c
         if "gate" in p:
             p["gate"].threshold_db = float(c.get("gate_db", -50))
-        if self.denoiser is not None:
-            prof_data = c.get("noise_profile") if c.get("noise_learn") else None
-            key = (prof_data or {}).get("created")
-            if key != self._profile_key:
-                from .denoise import NoiseProfile
-
-                self._profile_key = key
-                self._profile = NoiseProfile(prof_data) if prof_data else None
-            self.denoiser.configure(c.get("denoise_strength", 100) / 100.0, True,
-                                    self._profile if prof_data else None)
+        self._configure_denoiser(c)
         st = float(c.get("pitch", 0))
         self.use_pitch = st != 0
         self.pitch.set_semitones(st)
@@ -308,9 +327,14 @@ class MicChain(_Chain):
     def process(self, x: np.ndarray) -> np.ndarray:
         """x — моно float32, возвращает новый массив той же длины."""
         self._apply_pending()
+        self._swap_denoiser()
         n = len(x)
-        if self.denoiser is not None:
-            x = self.denoiser.process(x)
+        if self._ai:
+            if self.denoiser is not None:
+                x = self.denoiser.process(x)
+            else:  # нейросеть ещё загружается или недоступна
+                x = self.fallback.process(np.ascontiguousarray(x, np.float32).reshape(1, n), SAMPLE_RATE,
+                                          reset=False)[0]
         y = self.pre.process(np.ascontiguousarray(x, np.float32).reshape(1, n), SAMPLE_RATE,
                              reset=False)[0] if len(self.pre) else x
         if self.use_pitch:

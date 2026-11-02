@@ -160,6 +160,16 @@ class Engine:
         streams += [o.stream for o in (self._cable, self._mon, self._spk_out) if o is not None]
         return all(s.active for s in streams if s is not None)
 
+    @property
+    def underruns(self) -> int:
+        """Сколько раз звук не успел (опустошения буферов микрофона и контроля)."""
+        return sum(r.underruns for r in (self._cable_ring, self._mon_ring) if r is not None)
+
+    @property
+    def buffer_ms(self) -> float:
+        r = self._cable_ring or self._mon_ring
+        return r.target / 48.0 if r is not None else 0.0
+
     def idle_for(self) -> float:
         return time.monotonic() - self.last_activity
 

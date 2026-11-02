@@ -56,6 +56,9 @@ class App:
         self.engine = None
         self._running_cfg = {"mic": None, "spk": None}
         self._lock_target: tuple[str, float] | None = None
+        self._dn_engine = None          # какая нейросеть шумодава установлена в цепочку
+        self._overload = 0
+        self.denoise_info: tuple[str, int] | None = None  # (название, задержка мс) — для окна
         self._init_tries = 0
         self._engine_retry = 0
         self._active_ids: frozenset = frozenset()
@@ -488,7 +491,8 @@ class App:
             from . import denoise
 
             denoise.load_library(force=True)
-            self._w_prepare_denoise()
+            self._dn_engine = None  # пересоздать нейросеть
+            self._w_prepare_denoise(self._snap)
         self.worker.submit(job)
         self.settings_changed(devices=True)
 
@@ -732,6 +736,7 @@ class App:
                 eng.stop_mic()
                 eng.stop_spk()
                 self._w_schedule_idle()
+            self._w_prepare_denoise(snap)  # освободить память нейросети
             self._running_cfg = {"mic": None, "spk": None}
             self.ui(self._set_engine_status, "", "")
             return
@@ -751,8 +756,6 @@ class App:
         want_mic = want_spk = None
         mic_cable_capture = ""
         if mic_on:
-            if snap["mic"]["denoise"] == "ai":
-                self._w_prepare_denoise()
             cable, cable_capture = self._virtual_pair(snap["virtual_mic"], outs, ins) if snap["virtual_mic"] \
                 else (None, None)
             if mic_dev is None:
@@ -783,6 +786,7 @@ class App:
                 eng = self._w_get_engine()
             if eng is not None:
                 self._push_dsp(eng, snap)
+                self._w_prepare_denoise(snap)  # до запуска микрофона: нейросеть уже будет готова
                 if eng.block != snap["block_size"]:
                     eng.stop()
                     eng.block = snap["block_size"]
@@ -798,6 +802,8 @@ class App:
                         try:
                             eng.start_mic(*want_mic)
                             self._running_cfg["mic"] = want_mic
+                            self._overload = 0
+                            self.worker.submit(self._w_check_load, delay=4.0, key="load")
                         except Exception as err:  # noqa: BLE001
                             mic_status = str(err)
                 if want_spk != self._running_cfg["spk"]:
@@ -838,17 +844,82 @@ class App:
             spk_status = f"Работает — звук идёт в: {want_spk[1]}"
         self.ui(self._set_engine_status, mic_status, spk_status)
 
-    def _w_prepare_denoise(self) -> None:
-        """Загрузить нейросеть заранее (не в аудиопотоке) и сообщить окну, доступна ли она."""
+    def _w_prepare_denoise(self, snap: dict) -> None:
+        """Создать выбранную нейросеть шумодава (до секунды — здесь, а не в аудиопотоке)
+        и передать её в цепочку микрофона. Если DeepFilterNet недоступен — откат на RNNoise."""
+        eng = self.engine
+        if eng is None:
+            return
+        mic = snap["mic"]
+        want = mic["denoise_engine"] if mic["enabled"] and mic["denoise"] == "ai" else None
+        if want == self._dn_engine:
+            return
         from . import denoise
 
-        was_ready = denoise.library_ready()
-        if denoise.load_library() is None:
-            self.ui(self.report, "denoise", denoise.library_error() or "ИИ-шумоподавление недоступно", False)
+        if want is None:
+            eng.mic_chain.install_denoiser(None)
+            self._dn_engine = None
+            self.denoise_info = None
+            self.worker.submit(self._w_free_retired, delay=1.0, key="dn_free")
             return
-        self.ui(self.report, "denoise", "", True)
-        if not was_ready and self.engine is not None:  # перестроить цепочку уже с нейросетью
-            self._push_dsp(self.engine, self._snap)
+        title = denoise.ENGINES[want][0]
+        self.ui(self.report, "denoise", f"Загружаю нейросеть {title}…", None)
+        t0 = time.perf_counter()
+        used, note = want, ""
+        try:
+            dn = denoise.Denoiser(denoise.create_backend(want))
+        except Exception as err:  # noqa: BLE001
+            log.warning("Шумодав %s недоступен: %s", want, err)
+            if want == "rnnoise":
+                self._dn_engine = want
+                self.ui(self.report, "denoise", f"RNNoise: {err}", False)
+                return
+            try:
+                dn = denoise.Denoiser(denoise.create_backend("rnnoise"))
+                used, note = "rnnoise", f"{title} недоступна ({err}) — пока работает RNNoise"
+            except Exception as err2:  # noqa: BLE001
+                self._dn_engine = want
+                self.ui(self.report, "denoise", f"{title}: {err}; RNNoise: {err2}", False)
+                return
+        eng.mic_chain.install_denoiser(dn)
+        self._dn_engine = want
+        self.denoise_info = denoise.ENGINES[used][:2]
+        log.info("Шумодав: %s (загрузка %.0f мс)", used, (time.perf_counter() - t0) * 1000)
+        self.ui(self.report, "denoise", note, False if note else True)
+        self.worker.submit(self._w_free_retired, delay=1.0, key="dn_free")
+
+    LIGHTER = {"dfn_ll": "dfn", "dfn": "rnnoise"}
+
+    def _w_check_load(self) -> None:
+        """Раз в 3 с, пока работает микрофон: если процессор не успевает обрабатывать звук
+        (обработка блока дольше 70% его длительности), переходим на более лёгкую нейросеть."""
+        eng = self.engine
+        if eng is None or not eng.mic_running:
+            return
+        budget = self._snap["block_size"] / 48.0
+        self._overload = self._overload + 1 if eng.proc_ms > 0.7 * budget else 0
+        cur = self._snap["mic"]["denoise_engine"]
+        if self._overload >= 3 and cur in self.LIGHTER and self._snap["mic"]["denoise"] == "ai":
+            self._overload = 0
+            log.warning("Процессор не успевает (%.1f мс на блок %.0f мс) — переход %s → %s",
+                        eng.proc_ms, budget, cur, self.LIGHTER[cur])
+            self.ui(self._downgrade_denoise, cur, self.LIGHTER[cur], eng.proc_ms)
+        self.worker.submit(self._w_check_load, delay=3.0, key="load")
+
+    def _downgrade_denoise(self, cur: str, new: str, ms: float) -> None:
+        if self.cfg["mic"]["denoise_engine"] != cur:
+            return
+        self.cfg["mic"]["denoise_engine"] = new
+        self.settings_changed(devices=True)
+        names = {"dfn": "DeepFilterNet3 лёгкая", "rnnoise": "RNNoise"}
+        self.notify(APP_NAME, f"Процессор не успевал ({ms:.1f} мс на 10 мс звука) — включил {names[new]}")
+        self.refresh_ui()
+
+    def _w_free_retired(self) -> None:
+        eng = self.engine
+        if eng is not None:
+            for old in eng.mic_chain.take_retired():
+                old.close()
 
     def _set_engine_status(self, mic: str, spk: str) -> None:
         self.status["mic"], self.status["spk"] = mic, spk
@@ -911,25 +982,25 @@ class App:
                 except Exception as err:  # noqa: BLE001
                     add(False, f"Микрофон «{mic.name}» не открывается: {err}")
 
-        try:
-            from . import denoise
+        from . import denoise
+        import numpy as np
 
-            lib = denoise.load_library()
-            if lib is None:
-                add(False, f"ИИ-шумоподавление: {denoise.library_error()}")
-            else:
-                import numpy as np
-
-                dn = denoise.Denoiser(lib)
-                frame = (np.random.default_rng(0).standard_normal(480) * 0.01).astype(np.float32)
+        frame = (np.random.default_rng(0).standard_normal(480) * 0.01).astype(np.float32)
+        for key in ("dfn_ll", "dfn", "rnnoise"):
+            title, latency = denoise.ENGINES[key][:2]
+            try:
+                t0 = time.perf_counter()
+                dn = denoise.Denoiser(denoise.create_backend(key))
+                load_ms = (time.perf_counter() - t0) * 1000
                 t0 = time.perf_counter()
                 for _ in range(100):
                     dn.process(frame)
                 ms = (time.perf_counter() - t0) * 10
                 dn.close()
-                add(True, f"ИИ-шумоподавление (RNNoise): {ms:.2f} мс на кадр 10 мс, задержка 20 мс")
-        except Exception as err:  # noqa: BLE001
-            add(False, f"ИИ-шумоподавление: {err}")
+                add(True, f"Шумодав {title}: {ms:.2f} мс на кадр 10 мс, задержка {latency} мс, "
+                          f"загрузка {load_ms:.0f} мс")
+            except Exception as err:  # noqa: BLE001
+                add(False if key != "rnnoise" else None, f"Шумодав {title}: {err}")
 
         try:
             voices = self.media.submit(lambda: self._m_tts().sapi.voices()).result(40)

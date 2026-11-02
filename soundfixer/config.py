@@ -37,7 +37,8 @@ DEFAULTS: dict = {
         "set_virtual_default": True,  # делать виртуальный микрофон устройством Windows по умолчанию
         "gain": 100,               # % (100 = без изменений, до 1000)
         "hpf": True,               # срез низкого гула
-        "denoise": "ai",           # off | gate (простой порог) | ai (нейросеть RNNoise + умный гейт)
+        "denoise": "ai",           # off | gate (простой порог) | ai (нейросеть + умный гейт)
+        "denoise_engine": "dfn_ll",  # dfn_ll — DeepFilterNet3 10 мс | dfn — лёгкая 30 мс | rnnoise
         "denoise_strength": 100,   # сила ИИ-шумоподавления, %
         "noise_learn": True,       # использовать запомненный профиль шума
         "noise_profile": None,     # что программа запомнила о вашем окружении
@@ -169,6 +170,8 @@ def load() -> dict:
         cfg["spk"]["eq"] = [0.0] * len(EQ_BANDS)
     if cfg["mic"]["denoise"] not in ("off", "gate", "ai"):
         cfg["mic"]["denoise"] = "ai"
+    if cfg["mic"]["denoise_engine"] not in ("dfn_ll", "dfn", "rnnoise"):
+        cfg["mic"]["denoise_engine"] = "dfn_ll"
     if cfg["tts"]["engine"] not in ("sapi", "edge"):
         cfg["tts"]["engine"] = "sapi"
     if not isinstance(cfg["mic"]["noise_profile"], dict):

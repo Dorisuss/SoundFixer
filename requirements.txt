@@ -10,6 +10,7 @@ sounddevice>=0.5.0
 pedalboard>=0.9.12
 # Нейроголоса Microsoft для озвучки (нужен интернет)
 edge-tts>=7.0
-# ИИ-шумоподавление RNNoise ставится отдельно и без зависимостей
+# ИИ-шумоподавление DeepFilterNet3 уже лежит в soundfixer/bin и soundfixer/models.
+# Запасная лёгкая нейросеть RNNoise ставится отдельно и без зависимостей
 # (иначе pip потянет ненужные matplotlib/audiolab):
 #   python -m pip install --no-deps pyrnnoise
