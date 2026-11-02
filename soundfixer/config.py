@@ -91,6 +91,32 @@ DEFAULTS: dict = {
                     "fade_less": "ctrl+alt+page up"},
         "awake": {"enabled": False, "display": True},
         "download": {"action": "sleep", "kbps": 300, "minutes": 3},
+        # текст
+        "translate": {"enabled": False, "hotkey": "ctrl+alt+e", "replace_hotkey": "", "target": "auto"},
+        "plainpaste": {"enabled": False, "hotkey": "win+alt+v", "join_lines": False},
+        "qr": {"enabled": False, "hotkey": "ctrl+alt+q"},
+        "ocr": {"enabled": False, "hotkey": "ctrl+alt+o", "lang": "auto"},
+        # окна и экран
+        "snap": {"enabled": False, "left": "ctrl+alt+left", "right": "ctrl+alt+right", "top": "ctrl+alt+up",
+                 "bottom": "ctrl+alt+down", "center": "ctrl+alt+c", "maximize": "ctrl+alt+enter",
+                 "monitor": "ctrl+alt+n"},
+        "color": {"enabled": False, "hotkey": "win+shift+c", "format": "hex"},
+        "night": {"enabled": False, "mode": "schedule", "start": "21:00", "end": "07:00", "transition": 30,
+                  "temperature": 4000, "dim": 100, "pause_games": True, "hotkey": "ctrl+alt+l"},
+        "theme": {"enabled": False, "light": "07:00", "dark": "19:00", "apps": True, "system": True,
+                  "hotkey": ""},
+        "brightness": {"enabled": False, "up": "ctrl+alt+]", "down": "ctrl+alt+[", "off": "", "step": 10},
+        # звук
+        "apps": {"enabled": False, "up": "ctrl+alt+=", "down": "ctrl+alt+-", "mute": "", "mixer": "",
+                 "step": 10, "play": "", "next": "", "prev": ""},
+        "micguard": {"enabled": False, "overlay": "muted", "corner": "top-right", "size": 100, "osd": True,
+                     "talk_alert": True, "alert_every": 30},
+        "autoprofile": {"enabled": False, "rules": [], "cycle_hotkey": "ctrl+alt+p"},
+        # система
+        "breaks": {"enabled": False, "every": 20, "seconds": 20, "long": True, "long_every": 60,
+                   "long_minutes": 5, "idle_reset": 5, "skip_fullscreen": True},
+        "power": {"enabled": False, "game": "", "battery": ""},
+        "sleeptimer": {"minutes": 60, "action": "sleep", "fade": True},
     },
     "soundboard": {
         "volume": 80,
@@ -174,6 +200,7 @@ def load() -> dict:
         cfg["mic"]["denoise_engine"] = "dfn_ll"
     if cfg["tts"]["engine"] not in ("sapi", "edge"):
         cfg["tts"]["engine"] = "sapi"
+    _validate_tools(cfg["tools"])
     if not isinstance(cfg["mic"]["noise_profile"], dict):
         cfg["mic"]["noise_profile"] = None
     cfg["soundboard"]["sounds"] = [
@@ -181,6 +208,44 @@ def load() -> dict:
         if isinstance(s, dict) and (isinstance(s.get("path"), str) or isinstance(s.get("text"), str))
     ]
     return cfg
+
+
+_CHOICES = {
+    ("translate", "target"): ("auto", "ru", "en", "uk", "de", "fr", "es", "zh-CN", "ja", "kk"),
+    ("ocr", "lang"): ("auto", "ru", "en", "uk", "de", "fr", "es", "zh", "ja"),
+    ("color", "format"): ("hex", "rgb", "hsl"),
+    ("night", "mode"): ("schedule", "always"),
+    ("micguard", "overlay"): ("muted", "always", "off"),
+    ("micguard", "corner"): ("top-right", "top-left", "bottom-right", "bottom-left"),
+    ("sleeptimer", "action"): ("sleep", "hibernate", "shutdown", "mute"),
+    ("download", "action"): ("sleep", "hibernate", "shutdown"),
+}
+_TIMES = (("night", "start"), ("night", "end"), ("theme", "light"), ("theme", "dark"))
+
+
+def _valid_time(text: str) -> bool:
+    try:
+        h, m = text.split(":")
+        return 0 <= int(h) < 24 and 0 <= int(m) < 60
+    except (ValueError, AttributeError):
+        return False
+
+
+def _validate_tools(tools: dict) -> None:
+    defaults = DEFAULTS["tools"]
+    for (tool, key), allowed in _CHOICES.items():
+        if tools[tool][key] not in allowed:
+            tools[tool][key] = defaults[tool][key]
+    for tool, key in _TIMES:
+        if not _valid_time(tools[tool][key]):
+            tools[tool][key] = defaults[tool][key]
+    tools["autoprofile"]["rules"] = [
+        {"exe": r["exe"].strip().lower(), "profile": r["profile"]}
+        for r in tools["autoprofile"]["rules"]
+        if isinstance(r, dict) and isinstance(r.get("exe"), str) and isinstance(r.get("profile"), str)
+        and r["exe"].strip()
+    ]
+    tools["games"]["list"] = [g for g in tools["games"]["list"] if isinstance(g, str)]
 
 
 _save_lock = threading.Lock()

@@ -51,6 +51,20 @@ REGISTRY = {
     "ping": ("network", "PingMonitor"),
     "windows": ("desktop", "WindowTools"),
     "awake": ("desktop", "KeepAwake"),
+    "translate": ("textutils", "TranslateTool"),
+    "plainpaste": ("textutils", "PlainPaste"),
+    "qr": ("textutils", "QRTool"),
+    "ocr": ("ocr", "ScreenText"),
+    "snap": ("desktop", "WindowSnap"),
+    "color": ("desktop", "ColorPicker"),
+    "night": ("screen", "NightLight"),
+    "theme": ("screen", "ThemeSwitcher"),
+    "brightness": ("screen", "Brightness"),
+    "apps": ("audio_tools", "AppVolume"),
+    "micguard": ("audio_tools", "MicGuard"),
+    "autoprofile": ("audio_tools", "AutoProfiles"),
+    "breaks": ("system", "BreakReminder"),
+    "power": ("system", "PowerPlans"),
 }
 
 
@@ -60,6 +74,7 @@ class ToolManager:
         self.tools: dict[str, Tool] = {}
         self.watcher = None
         self.download = None  # network.DownloadWatcher, когда включено «выключить после загрузки»
+        self.sleep_timer = None  # system.SleepTimer
 
     def _tool(self, key: str) -> Tool:
         if key not in self.tools:
@@ -116,6 +131,20 @@ class ToolManager:
         parts = [t.tray_text() for t in self.tools.values() if t.running]
         return " • ".join(p for p in parts if p)
 
+    def broadcast(self, event: str, *args) -> None:
+        """Событие программы (например, on_mute) — всем работающим инструментам, которым оно нужно."""
+        for tool in list(self.tools.values()):
+            fn = getattr(tool, event, None)
+            if tool.running and fn is not None:
+                try:
+                    fn(*args)
+                except Exception:  # noqa: BLE001
+                    log.exception("Инструмент %s: %s", tool.key, event)
+
+    def instance(self, key: str) -> Tool:
+        """Объект инструмента без запуска (например, окно микшера из трея)."""
+        return self._tool(key)
+
     def stop_all(self) -> None:
         for tool in self.tools.values():
             if tool.running:
@@ -125,6 +154,8 @@ class ToolManager:
                     log.exception("Остановка инструмента %s", tool.key)
         if self.download is not None:
             self.download.cancel()
+        if self.sleep_timer is not None:
+            self.sleep_timer.cancel()
         if self.watcher is not None:
             self.watcher.stop()
             self.watcher = None

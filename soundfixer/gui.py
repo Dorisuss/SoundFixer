@@ -138,10 +138,11 @@ class MainWindow:
         self.root.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
 
     # ================================================================ помощники виджетов
-    def _page(self, title: str) -> ttk.Frame:
-        """Вкладка с вертикальной прокруткой."""
-        outer = ttk.Frame(self.nb)
-        self.nb.add(outer, text=title)
+    def _page(self, title: str, nb=None) -> ttk.Frame:
+        """Вкладка с вертикальной прокруткой (nb — вложенный блокнот, например в «Инструментах»)."""
+        nb = nb or self.nb
+        outer = ttk.Frame(nb)
+        nb.add(outer, text=title)
         canvas = tk.Canvas(outer, bg=BG, highlightthickness=0, borderwidth=0)
         bar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
         inner = ttk.Frame(canvas)
@@ -943,21 +944,300 @@ class MainWindow:
 
     # ================================================================ вкладка «Инструменты»
     def _tab_tools(self):
-        page = self._page("Инструменты")
+        outer = ttk.Frame(self.nb)
+        self.nb.add(outer, text="Инструменты")
+        sub = self.tools_nb = ttk.Notebook(outer)
+        sub.pack(fill="both", expand=True, pady=(6, 0))
+        sub.bind("<<NotebookTabChanged>>", lambda _e: self._start_meters())
         self.tool_status: dict[str, ttk.Label] = {}
+        self._tools_text(self._page("Текст", sub))
+        self._tools_windows(self._page("Окна и экран", sub))
+        self._tools_sound(self._page("Звук", sub))
+        self._tools_games(self._page("Игры и сеть", sub))
+        self._tools_system(self._page("Система", sub))
+
+    def _tool_card(self, page, key, title, enable_text="Включить"):
+        card = self._card(page, title)
+        self._check(card, enable_text, ("tools", key), "enabled", tools=True, style="Big.TCheckbutton")
+        return card
+
+    def _combo(self, parent, text, section, key, options: dict, tools=True, width=30, cmd=None):
+        """Выпадающий список: options — значение → подпись."""
+        row = self._next_row(parent)
+        ttk.Label(parent, text=text).grid(row=row, column=0, sticky="w", padx=(0, 8))
+        var = tk.StringVar(value=options.get(self._get(section, key), ""))
+        box = ttk.Combobox(parent, textvariable=var, state="readonly", values=list(options.values()), width=width)
+        box.grid(row=row, column=1, columnspan=2, sticky="w", pady=3)
+
+        def picked(_e=None):
+            value = next((k for k, v in options.items() if v == var.get()), None)
+            if value is None or value == self._get(section, key):
+                return
+            self._set(section, key, value)
+            if cmd:
+                cmd()
+            self.app.settings_changed(tools=tools)
+            if tools and isinstance(section, tuple):
+                self.refresh_tool(section[1])
+
+        box.bind("<<ComboboxSelected>>", picked)
+        self._sync_vars.append((var, lambda: options.get(self._get(section, key), "")))
+        return box
+
+    def _time_entry(self, parent, text, section, key, hint=""):
+        row = self._next_row(parent)
+        ttk.Label(parent, text=text).grid(row=row, column=0, sticky="w", padx=(0, 8))
+        var = tk.StringVar(value=self._get(section, key))
+        ent = ttk.Entry(parent, textvariable=var, width=8)
+        ent.grid(row=row, column=1, sticky="w", pady=3)
+        if hint:
+            ttk.Label(parent, text=hint, style="Hint.TLabel").grid(row=row, column=2, sticky="e")
+
+        def done(_e=None):
+            text_ = var.get().strip().replace(".", ":")
+            if config._valid_time(text_):
+                h, m = text_.split(":")
+                text_ = f"{int(h):02d}:{int(m):02d}"
+                var.set(text_)
+                if text_ != self._get(section, key):
+                    self._set(section, key, text_)
+                    self.app.settings_changed(tools=True)
+            else:
+                var.set(self._get(section, key))
+
+        ent.bind("<FocusOut>", done)
+        ent.bind("<Return>", done)
+        self._sync_vars.append((var, lambda: self._get(section, key)))
+        return var
+
+    def _buttons(self, parent, *buttons):
+        row = ttk.Frame(parent, style="Card.TFrame")
+        row.grid(row=self._next_row(parent), column=0, columnspan=3, sticky="w", pady=(4, 2))
+        out = []
+        for i, (text, cmd, *accent) in enumerate(buttons):
+            b = ttk.Button(row, text=text, command=cmd, style="Accent.TButton" if accent and accent[0] else "TButton")
+            b.pack(side="left", padx=(0 if i == 0 else 6, 0))
+            out.append(b)
+        return out
+
+    # ---------------------------------------------------------------- Текст
+    def _tools_text(self, page):
         self._hint(self._card(page, "Мультитул"),
                    "Каждый инструмент включается отдельно. Выключенный не загружается и не тратит ни память, "
-                   "ни процессор. Горячие клавиши задаются кликом по полю и нажатием сочетания.", row=0)
+                   "ни процессор. Горячие клавиши задаются кликом по полю и нажатием сочетания "
+                   "(Backspace — убрать).", row=0)
 
-        card = self._card(page, "Исправление раскладки")
-        self._check(card, "Включить", ("tools", "layout"), "enabled", tools=True, style="Big.TCheckbutton")
+        card = self._tool_card(page, "layout", "Исправление раскладки")
         self._hotkey_entry(card, "Клавиша", ("tools", "layout"), "hotkey")
         self.tool_status["layout"] = self._status_label(card)
         self._hint(card, "Набрали «ghbdtn» вместо «привет»? Нажмите клавишу — выделенный текст (или слово перед "
                          "курсором) исправится, а раскладка переключится сама. Работает в обе стороны.")
 
-        card = self._card(page, "Игры")
-        self._check(card, "Включить", ("tools", "games"), "enabled", tools=True, style="Big.TCheckbutton")
+        from .tools.textutils import LANGS
+
+        card = self._tool_card(page, "translate", "Перевод выделенного")
+        self._hotkey_entry(card, "Перевести", ("tools", "translate"), "hotkey")
+        self._hotkey_entry(card, "Заменить переводом", ("tools", "translate"), "replace_hotkey")
+        self._combo(card, "Язык перевода", ("tools", "translate"), "target", LANGS)
+        self.tool_status["translate"] = self._status_label(card)
+        self._hint(card, "Выделите текст в любой программе и нажмите клавишу — перевод появится рядом с курсором: "
+                         "его можно скопировать, прочитать вслух или вставить вместо оригинала. Вторая клавиша "
+                         "сразу заменяет выделенное переводом — удобно в чатах. Нужен интернет (Google, запасной "
+                         "— MyMemory).")
+
+        card = self._tool_card(page, "ocr", "Текст с экрана")
+        self._hotkey_entry(card, "Клавиша", ("tools", "ocr"), "hotkey")
+        self._combo(card, "Язык текста", ("tools", "ocr"), "lang",
+                    {"auto": "Авто (русский и английский)", "ru": "Русский", "en": "English", "uk": "Українська",
+                     "de": "Deutsch", "fr": "Français", "es": "Español", "zh": "中文", "ja": "日本語"})
+        self.tool_status["ocr"] = self._status_label(card)
+        self._hint(card, "Обведите мышью текст на картинке, в видео, игре или окне, которое не даёт копировать, — "
+                         "он окажется в буфере обмена. Распознаёт сама Windows, без интернета. Языки берутся из "
+                         "установленных в Windows (Параметры → Время и язык → Язык).")
+        self._buttons(card, ("Распознать сейчас", self.app.screen_text))
+
+        card = self._tool_card(page, "plainpaste", "Вставка простым текстом")
+        self._hotkey_entry(card, "Клавиша", ("tools", "plainpaste"), "hotkey")
+        self._check(card, "Склеивать строки, разорванные при копировании из PDF", ("tools", "plainpaste"),
+                    "join_lines", tools=True)
+        self.tool_status["plainpaste"] = self._status_label(card)
+        self._hint(card, "Вставляет текст из буфера без шрифтов, цветов, ссылок и таблиц — как будто его набрали "
+                         "вручную.")
+
+        card = self._tool_card(page, "qr", "QR-код буфера обмена")
+        self._hotkey_entry(card, "Клавиша", ("tools", "qr"), "hotkey")
+        self.tool_status["qr"] = self._status_label(card)
+        self._hint(card, "Скопируйте ссылку или текст и нажмите клавишу — появится QR-код: наведите камеру "
+                         "телефона, чтобы открыть ссылку на нём.")
+
+    # ---------------------------------------------------------------- Окна и экран
+    def _tools_windows(self, page):
+        card = self._tool_card(page, "snap", "Раскладка окон")
+        for key, text in (("left", "Влево (½ → ⅓ → ⅔)"), ("right", "Вправо (½ → ⅓ → ⅔)"), ("top", "Верхняя половина"),
+                          ("bottom", "Нижняя половина"), ("center", "По центру"), ("maximize", "Развернуть"),
+                          ("monitor", "На другой монитор")):
+            self._hotkey_entry(card, text, ("tools", "snap"), key)
+        self.tool_status["snap"] = self._status_label(card)
+        self._hint(card, "Действует на активное окно и прилипает к краям без щелей. Повторное нажатие той же "
+                         "клавиши меняет ширину: половина → треть → две трети.")
+
+        card = self._tool_card(page, "windows", "Поверх всех и прозрачность")
+        self._hotkey_entry(card, "Поверх всех", ("tools", "windows"), "topmost_hotkey")
+        self._hotkey_entry(card, "Прозрачнее", ("tools", "windows"), "fade_more")
+        self._hotkey_entry(card, "Плотнее", ("tools", "windows"), "fade_less")
+        self.tool_status["windows"] = self._status_label(card)
+        self._hint(card, "Закрепите видео или чат поверх игры и сделайте полупрозрачным. Окна, запущенные от "
+                         "администратора, Windows менять не даёт.")
+
+        card = self._tool_card(page, "color", "Пипетка")
+        self._hotkey_entry(card, "Клавиша", ("tools", "color"), "hotkey")
+        self._combo(card, "Копировать как", ("tools", "color"), "format",
+                    {"hex": "HEX — #1E90FF", "rgb": "RGB — rgb(30, 144, 255)", "hsl": "HSL — hsl(210, 100%, 56%)"})
+        self.tool_status["color"] = self._status_label(card)
+        self._hint(card, "Наведите курсор на любую точку экрана и нажмите клавишу — код цвета уже в буфере, рядом "
+                         "покажется увеличенный фрагмент.")
+
+        card = self._tool_card(page, "night", "Ночной режим (тёплые цвета)")
+        self._combo(card, "Когда", ("tools", "night"), "mode",
+                    {"schedule": "По расписанию", "always": "Всегда, пока включено"})
+        self._time_entry(card, "С", ("tools", "night"), "start", "например 21:00")
+        self._time_entry(card, "До", ("tools", "night"), "end", "например 07:00")
+        self._slider(card, "Плавный переход", ("tools", "night"), "transition", 0, 60, lambda v: f"{v:.0f} мин",
+                     tools=True)
+        self._slider(card, "Цвет ночью", ("tools", "night"), "temperature", 2700, 6000,
+                     lambda v: f"{v:.0f} K" + (" — очень тёплый" if v < 3400 else ""), step=100, tools=True)
+        self._slider(card, "Яркость ночью", ("tools", "night"), "dim", 50, 100, lambda v: f"{v:.0f}%", tools=True)
+        self._check(card, "Не менять цвета в играх", ("tools", "night"), "pause_games", tools=True)
+        self._hotkey_entry(card, "Вкл/выкл сейчас", ("tools", "night"), "hotkey")
+        self.tool_status["night"] = self._status_label(card)
+        self._buttons(card, ("Снять ограничение Windows", self._night_unlock))
+        self._hint(card, "Убирает синий свет вечером — глазам легче, засыпать проще. Работает и там, где «Ночной "
+                         "свет» Windows недоступен. Если цвета не становятся теплее ~3400 K, нажмите «Снять "
+                         "ограничение» (нужны права администратора, подействует после перезагрузки).")
+
+        card = self._tool_card(page, "theme", "Тёмная тема по расписанию")
+        self._time_entry(card, "Светлая с", ("tools", "theme"), "light", "например 07:00")
+        self._time_entry(card, "Тёмная с", ("tools", "theme"), "dark", "например 19:00")
+        self._check(card, "Тема программ", ("tools", "theme"), "apps", tools=True)
+        self._check(card, "Тема Windows (панель задач, меню «Пуск»)", ("tools", "theme"), "system", tools=True)
+        self._hotkey_entry(card, "Переключить сейчас", ("tools", "theme"), "hotkey")
+        self.tool_status["theme"] = self._status_label(card)
+
+        card = self._tool_card(page, "brightness", "Яркость мониторов")
+        self.bright_var = tk.DoubleVar(value=70)
+        row = self._next_row(card)
+        ttk.Label(card, text="Яркость").grid(row=row, column=0, sticky="w")
+        bright_val = ttk.Label(card, style="Value.TLabel", width=18, anchor="e", text="—")
+        bright_val.grid(row=row, column=2, sticky="e")
+        self.bright_var.trace_add("write", lambda *_: bright_val.configure(text=f"{self.bright_var.get():.0f}%"))
+        ttk.Scale(card, from_=0, to=100, variable=self.bright_var,
+                  command=lambda v: self.app.set_brightness(int(float(v)))).grid(row=row, column=1, sticky="ew",
+                                                                                 pady=3)
+        self._hotkey_entry(card, "Ярче", ("tools", "brightness"), "up")
+        self._hotkey_entry(card, "Темнее", ("tools", "brightness"), "down")
+        self._hotkey_entry(card, "Погасить экран", ("tools", "brightness"), "off")
+        self._slider(card, "Шаг", ("tools", "brightness"), "step", 5, 25, lambda v: f"{v:.0f}%", step=5, tools=True)
+        self.tool_status["brightness"] = self._status_label(card)
+        self._hint(card, "Меняет яркость самих мониторов (DDC/CI — включается в меню монитора) и экрана ноутбука. "
+                         "«Погасить экран» — для музыки или загрузок: любое движение мыши включит его обратно.")
+
+    def _night_unlock(self):
+        from .tools.screen import unlock_gamma_range
+
+        if unlock_gamma_range():
+            messagebox.showinfo(APP_NAME, "Готово. Перезагрузите компьютер, чтобы Windows разрешила более тёплые "
+                                          "цвета.", parent=self.root)
+
+    # ---------------------------------------------------------------- Звук
+    def _tools_sound(self, page):
+        card = self._tool_card(page, "apps", "Громкость программ")
+        self._buttons(card, ("Открыть микшер", self.app.open_mixer, True))
+        self._hotkey_entry(card, "Активная программа громче", ("tools", "apps"), "up")
+        self._hotkey_entry(card, "…тише", ("tools", "apps"), "down")
+        self._hotkey_entry(card, "…без звука", ("tools", "apps"), "mute")
+        self._slider(card, "Шаг", ("tools", "apps"), "step", 2, 25, lambda v: f"{v:.0f}%", tools=True)
+        self._hotkey_entry(card, "Открыть микшер", ("tools", "apps"), "mixer")
+        ttk.Label(card, text="Медиаклавиши (для клавиатур без них)", style="TLabel").grid(
+            row=self._next_row(card), column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self._hotkey_entry(card, "Пауза / воспроизведение", ("tools", "apps"), "play")
+        self._hotkey_entry(card, "Следующий трек", ("tools", "apps"), "next")
+        self._hotkey_entry(card, "Предыдущий трек", ("tools", "apps"), "prev")
+        self.tool_status["apps"] = self._status_label(card)
+        self._hint(card, "Сделайте игру тише, а Discord громче, не сворачивая игру: горячая клавиша меняет громкость "
+                         "программы, которая сейчас на экране, и показывает подсказку поверх игры.")
+
+        from .tools.audio_tools import CORNERS
+
+        card = self._tool_card(page, "micguard", "Индикатор микрофона")
+        self._combo(card, "Значок поверх всех окон", ("tools", "micguard"), "overlay",
+                    {"muted": "Когда микрофон выключен", "always": "Всегда (зелёный / красный)", "off": "Не показывать"})
+        corner_names = {"top-right": "Справа сверху", "top-left": "Слева сверху", "bottom-right": "Справа снизу",
+                        "bottom-left": "Слева снизу"}
+        self._combo(card, "Где", ("tools", "micguard"), "corner", {c: corner_names[c] for c in CORNERS})
+        self._slider(card, "Размер значка", ("tools", "micguard"), "size", 60, 200, lambda v: f"{v:.0f}%", step=10,
+                     tools=True)
+        self._check(card, "Крупная подсказка при включении/выключении (вместо уведомления)", ("tools", "micguard"),
+                    "osd", tools=True)
+        self._check(card, "Предупреждать, если говорю в выключенный микрофон", ("tools", "micguard"), "talk_alert",
+                    tools=True)
+        self.tool_status["micguard"] = self._status_label(card)
+
+        card = self._tool_card(page, "autoprofile", "Автопрофили")
+        self._hotkey_entry(card, "Следующий профиль", ("tools", "autoprofile"), "cycle_hotkey")
+        ttk.Label(card, text="Правила: запущена программа → профиль устройств").grid(
+            row=self._next_row(card), column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self.rules_list = tk.Listbox(card, height=4, bg=FIELD, fg=FG, selectbackground=ACCENT, relief="flat",
+                                     highlightthickness=0, activestyle="none")
+        self.rules_list.grid(row=self._next_row(card), column=0, columnspan=3, sticky="ew", pady=3)
+        self._buttons(card, ("+ Правило…", self._rule_add), ("Удалить", self._rule_remove))
+        self.tool_status["autoprofile"] = self._status_label(card)
+        self._hint(card, "Например: запустили игру — включился профиль с гарнитурой, закрыли — вернулся прежний. "
+                         "Профили создаются во вкладке «Устройства».")
+        self._refresh_rules()
+
+    def _rule_add(self):
+        from .tools import winapi
+
+        progs = winapi.visible_programs()
+        win = tk.Toplevel(self.root)
+        win.title("Новое правило")
+        win.configure(bg=PANEL)
+        win.transient(self.root)
+        ttk.Label(win, text="Программа (имя файла, например discord.exe)").pack(anchor="w", padx=10, pady=(10, 2))
+        exe_var = tk.StringVar()
+        ttk.Combobox(win, textvariable=exe_var, values=[e for e, _t in progs], width=40).pack(padx=10, fill="x")
+        ttk.Label(win, text="Профиль").pack(anchor="w", padx=10, pady=(8, 2))
+        prof_var = tk.StringVar(value=self.cfg["active_profile"])
+        ttk.Combobox(win, textvariable=prof_var, values=list(self.cfg["profiles"]), state="readonly",
+                     width=40).pack(padx=10, fill="x")
+
+        def ok():
+            exe = exe_var.get().strip().lower()
+            if exe and not exe.endswith(".exe"):
+                exe += ".exe"
+            if exe and prof_var.get() in self.cfg["profiles"]:
+                self.cfg["tools"]["autoprofile"]["rules"].append({"exe": exe, "profile": prof_var.get()})
+                self.app.settings_changed(tools=True)
+                self._refresh_rules()
+            win.destroy()
+
+        ttk.Button(win, text="Добавить", style="Accent.TButton", command=ok).pack(pady=10)
+
+    def _rule_remove(self):
+        sel = self.rules_list.curselection()
+        if sel:
+            del self.cfg["tools"]["autoprofile"]["rules"][sel[0]]
+            self.app.settings_changed(tools=True)
+            self._refresh_rules()
+
+    def _refresh_rules(self):
+        self.rules_list.delete(0, "end")
+        for r in self.cfg["tools"]["autoprofile"]["rules"]:
+            self.rules_list.insert("end", f"{r['exe']}  →  {r['profile']}")
+
+    # ---------------------------------------------------------------- Игры и сеть
+    def _tools_games(self, page):
+        card = self._tool_card(page, "games", "Игры")
         self._check(card, "Клавиша Win не сворачивает игру", ("tools", "games"), "block_win", tools=True)
         self._check(card, "Не показывать «Залипание клавиш» (5× Shift) и похожие окна", ("tools", "games"),
                     "no_sticky", tools=True)
@@ -969,18 +1249,28 @@ class MainWindow:
         self.games_list = tk.Listbox(card, height=4, bg=FIELD, fg=FG, selectbackground=ACCENT, relief="flat",
                                      highlightthickness=0, activestyle="none")
         self.games_list.grid(row=self._next_row(card), column=0, columnspan=3, sticky="ew", pady=3)
-        row = ttk.Frame(card, style="Card.TFrame")
-        row.grid(row=self._next_row(card), column=0, columnspan=3, sticky="w")
-        ttk.Button(row, text="+ Из запущенных…", command=self._game_add_running).pack(side="left")
-        ttk.Button(row, text="+ Файл…", command=self._game_add_file).pack(side="left", padx=6)
-        ttk.Button(row, text="Удалить", command=self._game_remove).pack(side="left")
+        self._buttons(card, ("+ Из запущенных…", self._game_add_running), ("+ Файл…", self._game_add_file),
+                      ("Удалить", self._game_remove))
         self.tool_status["games"] = self._status_label(card)
         self._hint(card, "Игры из Steam, Epic, GOG, Riot, Battle.net, Xbox, Ubisoft, EA и папок «Games» "
-                         "распознаются автоматически.")
+                         "распознаются автоматически. Список игр используют и другие инструменты: ночной режим, "
+                         "схемы питания.")
 
-        card = self._card(page, "Интернет")
-        self._check(card, "Пинг в трее и предупреждение о потерях", ("tools", "ping"), "enabled", tools=True,
-                    style="Big.TCheckbutton")
+        card = self._tool_card(page, "power", "Схемы питания")
+        plans = {"": "Не менять"}
+        try:
+            from .tools.system import power_plans
+
+            plans.update(power_plans())
+        except Exception:  # noqa: BLE001
+            pass
+        self._combo(card, "В игре", ("tools", "power"), "game", plans)
+        self._combo(card, "От батареи (ноутбук)", ("tools", "power"), "battery", plans)
+        self.tool_status["power"] = self._status_label(card)
+        self._hint(card, "В игре — максимальная производительность, после неё — как было. Схему можно выбрать и "
+                         "вручную в меню трея: «Инструменты» → «Схема питания».")
+
+        card = self._tool_card(page, "ping", "Интернет", "Пинг в трее и предупреждение о потерях")
         row_n = self._next_row(card)
         ttk.Label(card, text="Адрес").grid(row=row_n, column=0, sticky="w")
         self.ping_host = tk.StringVar(value=self.cfg["tools"]["ping"]["host"])
@@ -1013,20 +1303,71 @@ class MainWindow:
         self.dl_btn.grid(row=self._next_row(sub), column=0, sticky="w", pady=4)
         self.tool_status["download"] = self._status_label(sub)
 
-        card = self._card(page, "Окна")
-        self._check(card, "Включить", ("tools", "windows"), "enabled", tools=True, style="Big.TCheckbutton")
-        self._hotkey_entry(card, "Поверх всех", ("tools", "windows"), "topmost_hotkey")
-        self._hotkey_entry(card, "Прозрачнее", ("tools", "windows"), "fade_more")
-        self._hotkey_entry(card, "Плотнее", ("tools", "windows"), "fade_less")
-        self.tool_status["windows"] = self._status_label(card)
-        self._hint(card, "Действует на активное окно: закрепите видео или чат поверх игры и сделайте "
-                         "полупрозрачным. Окна, запущенные от администратора, Windows менять не даёт.")
+    # ---------------------------------------------------------------- Система
+    def _tools_system(self, page):
+        card = self._tool_card(page, "breaks", "Перерывы для глаз")
+        self._slider(card, "Перерыв каждые", ("tools", "breaks"), "every", 10, 60, lambda v: f"{v:.0f} мин работы",
+                     tools=True)
+        self._slider(card, "Длительность", ("tools", "breaks"), "seconds", 10, 60, lambda v: f"{v:.0f} с", tools=True)
+        self._check(card, "Длинный перерыв, чтобы размяться", ("tools", "breaks"), "long", tools=True)
+        self._slider(card, "…каждые", ("tools", "breaks"), "long_every", 30, 180, lambda v: f"{v:.0f} мин",
+                     step=10, tools=True)
+        self._slider(card, "…на", ("tools", "breaks"), "long_minutes", 2, 15, lambda v: f"{v:.0f} мин", tools=True)
+        self._check(card, "Не мешать в играх и фильмах на весь экран", ("tools", "breaks"), "skip_fullscreen",
+                    tools=True)
+        self.tool_status["breaks"] = self._status_label(card)
+        self._hint(card, "Правило 20-20-20: каждые 20 минут — 20 секунд смотреть вдаль. Считается только время за "
+                         "компьютером: если вы отошли на 5 минут, перерыв засчитан. Короткий перерыв — плашка "
+                         "сверху экрана, она не мешает печатать.")
 
-        card = self._card(page, "Не засыпать")
-        self._check(card, "Компьютер не уходит в сон (загрузки, фильмы, презентации)", ("tools", "awake"),
-                    "enabled", tools=True, style="Big.TCheckbutton")
+        card = self._tool_card(page, "awake", "Не засыпать", "Компьютер не уходит в сон (загрузки, фильмы, презентации)")
         self._check(card, "И экран не гаснет", ("tools", "awake"), "display", tools=True)
         self.tool_status["awake"] = self._status_label(card)
+
+        card = self._card(page, "Таймер сна")
+        self._slider(card, "Через", ("tools", "sleeptimer"), "minutes", 5, 240, lambda v: f"{v:.0f} мин", step=5)
+        self._combo(card, "Что сделать", ("tools", "sleeptimer"), "action",
+                    {"sleep": "Сон", "hibernate": "Гибернация", "shutdown": "Выключить компьютер",
+                     "mute": "Только выключить звук"}, tools=False)
+        self._check(card, "Плавно убавлять громкость в последние минуты", ("tools", "sleeptimer"), "fade")
+        (self.sleep_btn,) = self._buttons(card, ("Запустить", self._sleep_toggle, True))
+        self.tool_status["sleeptimer"] = self._status_label(card)
+        self._hint(card, "Засыпаете под фильм или музыку? Звук плавно стихнет, и компьютер уснёт. Быстрый запуск — "
+                         "в меню трея: «Инструменты» → «Таймер сна».")
+
+        card = self._card(page, "Чем занят файл?")
+        self._hint(card, "«Файл открыт в другой программе» и не удаляется? Выберите его — покажу, какие программы его "
+                         "держат, и помогу их закрыть.", row=0)
+        self._buttons(card, ("Выбрать файл…", lambda: self._locksmith(False)),
+                      ("Выбрать папку…", lambda: self._locksmith(True)))
+        from .tools.system import context_menu_enabled
+
+        self.ctx_menu = tk.BooleanVar(value=context_menu_enabled())
+        ttk.Checkbutton(card, text="Пункт «Чем занят?» в меню проводника (правый клик по файлу)",
+                        variable=self.ctx_menu, command=self._ctx_menu_toggle).grid(
+            row=self._next_row(card), column=0, columnspan=3, sticky="w", pady=2)
+
+    def _sleep_toggle(self):
+        if self.app.sleep_timer_active:
+            self.app.cancel_sleep_timer()
+        else:
+            self.app.start_sleep_timer()
+        self.refresh_tool("sleeptimer")
+
+    def _locksmith(self, folder: bool):
+        path = (filedialog.askdirectory(parent=self.root, title="Папка, которую не удаётся удалить") if folder else
+                filedialog.askopenfilename(parent=self.root, title="Файл, который не удаётся удалить"))
+        if path:
+            self.app.open_locksmith([os.path.normpath(path)])
+
+    def _ctx_menu_toggle(self):
+        from .tools.system import context_menu_enabled, set_context_menu
+
+        try:
+            set_context_menu(self.ctx_menu.get())
+        except OSError as err:
+            messagebox.showerror(APP_NAME, f"Не удалось: {err}", parent=self.root)
+        self.ctx_menu.set(context_menu_enabled())
 
     def _ping_host_changed(self):
         host = self.ping_host.get().strip()
@@ -1105,6 +1446,12 @@ class MainWindow:
         lbl = self.tool_status.get(key)
         if lbl is None:
             return
+        if key == "sleeptimer":
+            t = self.app.tools.sleep_timer
+            active = self.app.sleep_timer_active
+            self.sleep_btn.configure(text="Отменить" if active else "Запустить")
+            lbl.configure(text=t.status() if t is not None else "", foreground=GOOD if active else MUTED_FG)
+            return
         if key == "download":
             d = self.app.tools.download
             active = self.app.download_active
@@ -1115,10 +1462,12 @@ class MainWindow:
             return
         tool = self.app.tools.get(key)
         text = tool.status() if tool is not None and tool.running else ""
+        if key == "brightness" and tool is not None and getattr(tool, "level", None) is not None:
+            self.bright_var.set(tool.level)
         enabled = self.cfg["tools"].get(key, {}).get("enabled")
         if enabled and not text:
             text = "Работает" if key != "ping" else "Замеряю…"
-        bad = any(w in text for w in ("нет ответа", "не удалось", "Ошибка"))
+        bad = any(w in text for w in ("нет ответа", "не удалось", "Ошибка", "ограничивает"))
         lbl.configure(text=text if enabled else "Выключено",
                       foreground=(WARN if bad else GOOD) if enabled else MUTED_FG)
 
@@ -1272,6 +1621,7 @@ class MainWindow:
         """Синхронизирует виджеты с конфигом (после смены профиля, из трея и т.п.)."""
         self.cfg = self.app.cfg
         self._refresh_games()
+        self._refresh_rules()
         self.ping_host.set(self.cfg["tools"]["ping"]["host"])
         self.dl_action.set(self._dl_actions.get(self.cfg["tools"]["download"]["action"], "Сон"))
         for key in self.tool_status:

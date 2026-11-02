@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 
 import pystray
@@ -39,6 +40,56 @@ class Tray:
                     radio=True,
                 )
 
+        def timer(minutes):
+            return lambda: ui(app.start_sleep_timer, minutes)
+
+        def timer_items():
+            if app.sleep_timer_active:
+                yield Item(lambda _it: app.tools.sleep_timer.status(), None, enabled=False)
+                yield Item("Отменить таймер", lambda: ui(app.cancel_sleep_timer))
+                yield Menu.SEPARATOR
+            for m in (15, 30, 45, 60, 90, 120):
+                yield Item(f"Через {m} мин", timer(m))
+
+        def bright(level):
+            return lambda: ui(app.set_brightness, level)
+
+        def power(option):
+            return lambda: ui(app.set_power_option, option)
+
+        def power_items():
+            from .tools.system import active_power, power_plans
+
+            try:
+                plans = power_plans()
+            except Exception:  # noqa: BLE001
+                plans = []
+            for option, name in plans:
+                yield Item(name, power(option), radio=True,
+                           checked=lambda _it, o=option: o in active_power())
+
+        def tool_items():
+            tools = app.cfg["tools"]
+            yield Item("Громкость программ…", lambda: ui(app.open_mixer))
+            yield Item("Текст с экрана (распознать)", lambda: ui(app.screen_text))
+            yield Item("Чем занят файл…", lambda: ui(app.pick_locksmith))
+            yield Menu.SEPARATOR
+            yield Item("Ночной режим", lambda: ui(app.toggle_tool, "night"), checked=lambda _it: tools["night"]["enabled"])
+            yield Item("Тёмная тема по расписанию", lambda: ui(app.toggle_tool, "theme"),
+                       checked=lambda _it: tools["theme"]["enabled"])
+            if app.tools.get("brightness") is not None and app.tools.get("brightness").running:
+                yield Item("Яркость", Menu(*[Item(f"{v}%", bright(v)) for v in (100, 75, 50, 25, 10)]))
+            if sys.platform == "win32":
+                yield Item("Схема питания", Menu(power_items))
+            yield Menu.SEPARATOR
+            yield Item("Таймер сна", Menu(timer_items))
+            yield Item("Не засыпать", lambda: ui(app.toggle_tool, "awake"), checked=lambda _it: tools["awake"]["enabled"])
+            yield Item(lambda _it: "Отменить выключение после загрузки" if app.download_active
+                       else "Выключить после загрузки",
+                       lambda: ui(app.cancel_download_watch if app.download_active else app.start_download_watch))
+            yield Item("Перерывы для глаз", lambda: ui(app.toggle_tool, "breaks"),
+                       checked=lambda _it: tools["breaks"]["enabled"])
+
         return Menu(
             Item("Открыть SoundFixer", lambda: ui(app.show_window), default=True),
             Item("Профиль", Menu(profile_items)),
@@ -52,11 +103,7 @@ class Tray:
             Menu.SEPARATOR,
             Item(lambda _it: f"Интернет: {app.tools.tray_text() or '—'}", None, enabled=False,
                  visible=lambda _it: bool(app.tools.get("ping") and app.tools.get("ping").running)),
-            Item("Не засыпать", lambda: ui(app.toggle_tool, "awake"),
-                 checked=lambda _it: app.cfg["tools"]["awake"]["enabled"]),
-            Item(lambda _it: "Отменить выключение после загрузки" if app.download_active
-                 else "Выключить после загрузки",
-                 lambda: ui(app.cancel_download_watch if app.download_active else app.start_download_watch)),
+            Item("Инструменты", Menu(tool_items)),
             Menu.SEPARATOR,
             Item("Запускать с Windows", lambda: ui(app.toggle_autostart),
                  checked=lambda _it: app.autostart_enabled),

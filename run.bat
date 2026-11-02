@@ -9,7 +9,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-python -c "import pycaw, pystray, PIL, numpy, sounddevice, pedalboard, edge_tts" 2>nul
+python -c "import pycaw, pystray, PIL, numpy, sounddevice, pedalboard, edge_tts, qrcode" 2>nul
 if errorlevel 1 (
     echo Установка зависимостей...
     python -m pip install --upgrade -r requirements.txt

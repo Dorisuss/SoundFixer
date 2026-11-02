@@ -25,16 +25,21 @@ except ImportError:  # не Windows — модуль работает как з�
     winreg = None
 
 
-def launch_command() -> str:
+def base_command() -> str:
+    """Команда запуска программы без аргументов (exe или pythonw + скрипт)."""
     if getattr(sys, "frozen", False):  # PyInstaller exe
-        return f'"{Path(sys.executable).resolve()}" {TRAY_ARG}'
+        return f'"{Path(sys.executable).resolve()}"'
     exe = Path(sys.executable).resolve()
     if exe.name.lower() == "python.exe":
         pyw = exe.with_name("pythonw.exe")
         if pyw.exists():
             exe = pyw
     script = Path(__file__).resolve().parent.parent / "SoundFixer.pyw"
-    return f'"{exe}" "{script}" {TRAY_ARG}'
+    return f'"{exe}" "{script}"'
+
+
+def launch_command() -> str:
+    return f"{base_command()} {TRAY_ARG}"
 
 
 def _read_run_value():

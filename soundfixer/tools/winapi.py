@@ -362,3 +362,334 @@ def keep_awake(on: bool, display: bool = True) -> None:
     if on:
         flags |= ES_SYSTEM_REQUIRED | (ES_DISPLAY_REQUIRED if display else 0)
     kernel32.SetThreadExecutionState(flags)
+
+
+# =========================================================================== расширения для инструментов
+SW_RESTORE, SW_MAXIMIZE = 9, 3
+DWMWA_EXTENDED_FRAME_BOUNDS = 9
+HWND_BROADCAST = 0xFFFF
+WM_SETTINGCHANGE = 0x001A
+SMTO_ABORTIFHUNG = 0x0002
+SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 76, 77, 78, 79
+
+if IS_WINDOWS:
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    try:
+        dwmapi = ctypes.WinDLL("dwmapi")
+        _proto(dwmapi.DwmGetWindowAttribute, ctypes.c_long, wintypes.HWND, wintypes.DWORD, ctypes.c_void_p,
+               wintypes.DWORD)
+    except OSError:
+        dwmapi = None
+
+    class MONITORINFOEXW(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT),
+                    ("dwFlags", wintypes.DWORD), ("szDevice", wintypes.WCHAR * 32)]
+
+    class LASTINPUTINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+    MONITORENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HANDLE, wintypes.HDC,
+                                         ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+    _proto(user32.GetCursorPos, wintypes.BOOL, ctypes.POINTER(wintypes.POINT))
+    _proto(user32.GetDC, wintypes.HDC, wintypes.HWND)
+    _proto(user32.ReleaseDC, ctypes.c_int, wintypes.HWND, wintypes.HDC)
+    _proto(gdi32.GetPixel, wintypes.DWORD, wintypes.HDC, ctypes.c_int, ctypes.c_int)
+    _proto(gdi32.CreateDCW, wintypes.HDC, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_void_p)
+    _proto(gdi32.DeleteDC, wintypes.BOOL, wintypes.HDC)
+    _proto(gdi32.SetDeviceGammaRamp, wintypes.BOOL, wintypes.HDC, ctypes.c_void_p)
+    _proto(gdi32.GetDeviceGammaRamp, wintypes.BOOL, wintypes.HDC, ctypes.c_void_p)
+    _proto(user32.SetForegroundWindow, wintypes.BOOL, wintypes.HWND)
+    _proto(user32.ShowWindow, wintypes.BOOL, wintypes.HWND, ctypes.c_int)
+    _proto(user32.IsZoomed, wintypes.BOOL, wintypes.HWND)
+    _proto(user32.EnumDisplayMonitors, wintypes.BOOL, wintypes.HDC, ctypes.c_void_p, MONITORENUMPROC,
+           wintypes.LPARAM)
+    _proto(user32.SendMessageTimeoutW, ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT, wintypes.WPARAM,
+           wintypes.LPCWSTR, wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t))
+    _proto(user32.GetLastInputInfo, wintypes.BOOL, ctypes.POINTER(LASTINPUTINFO))
+    _proto(user32.GetSystemMetrics, ctypes.c_int, ctypes.c_int)
+    _proto(kernel32.GetTickCount, wintypes.DWORD)
+    _proto(kernel32.GetSystemPowerStatus, wintypes.BOOL, ctypes.c_void_p)
+    _proto(kernel32.LocalFree, wintypes.HLOCAL, ctypes.c_void_p)
+    _proto(gdi32.CreateCompatibleDC, wintypes.HDC, wintypes.HDC)
+    _proto(gdi32.CreateCompatibleBitmap, wintypes.HBITMAP, wintypes.HDC, ctypes.c_int, ctypes.c_int)
+    _proto(gdi32.SelectObject, wintypes.HGDIOBJ, wintypes.HDC, wintypes.HGDIOBJ)
+    _proto(gdi32.DeleteObject, wintypes.BOOL, wintypes.HGDIOBJ)
+    _proto(gdi32.BitBlt, wintypes.BOOL, wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+           wintypes.HDC, ctypes.c_int, ctypes.c_int, wintypes.DWORD)
+    _proto(gdi32.GetDIBits, ctypes.c_int, wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT,
+           ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT)
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),
+                    ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+                    ("biClrImportant", wintypes.DWORD)]
+
+
+# ---------------------------------------------------------------- выделенный текст
+def grab_selection(select_word: bool = True, timeout: float = 0.35) -> tuple[str | None, str | None]:
+    """Копирует выделенный текст активного окна → (текст, прежнее содержимое буфера).
+
+    Если ничего не выделено и select_word — выделяет слово перед курсором (Ctrl+Shift+←).
+    Буфер обмена после вызова изменён: верните его через set_clipboard_text(прежнее).
+    """
+    if not IS_WINDOWS:
+        return None, None
+    wait_modifiers_released()
+    saved = get_clipboard_text()
+
+    def copy() -> bool:
+        seq = clipboard_sequence()
+        send_keys(combo(VK_CONTROL, ord("C")))
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if clipboard_sequence() != seq:
+                return True
+            time.sleep(0.01)
+        return False
+
+    if not copy():
+        if not select_word:
+            return None, saved
+        send_keys(combo(VK_CONTROL, VK_SHIFT, VK_LEFT))
+        time.sleep(0.03)
+        if not copy():
+            return None, saved
+    return get_clipboard_text(), saved
+
+
+def paste_text(text: str, restore: str | None = None, hwnd: int = 0) -> None:
+    """Вставляет текст в активное (или указанное) окно через буфер обмена и возвращает буфер."""
+    if not IS_WINDOWS:
+        return
+    set_clipboard_text(text)
+    if hwnd:
+        user32.SetForegroundWindow(hwnd)
+        time.sleep(0.08)
+    wait_modifiers_released()
+    send_keys(combo(VK_CONTROL, ord("V")))
+    time.sleep(0.3)  # программа читает буфер асинхронно — не подменяем его сразу
+    if restore is not None:
+        set_clipboard_text(restore)
+
+
+# ---------------------------------------------------------------- курсор, цвет, система
+def cursor_pos() -> tuple[int, int]:
+    if not IS_WINDOWS:
+        return 0, 0
+    p = wintypes.POINT()
+    user32.GetCursorPos(ctypes.byref(p))
+    return p.x, p.y
+
+
+def pixel_color(x: int, y: int) -> tuple[int, int, int] | None:
+    if not IS_WINDOWS:
+        return None
+    dc = user32.GetDC(None)
+    try:
+        c = gdi32.GetPixel(dc, x, y)
+    finally:
+        user32.ReleaseDC(None, dc)
+    if c == 0xFFFFFFFF:  # CLR_INVALID
+        return None
+    return c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF
+
+
+def idle_seconds() -> float:
+    """Сколько секунд пользователь не трогал клавиатуру и мышь."""
+    if not IS_WINDOWS:
+        return 0.0
+    li = LASTINPUTINFO()
+    li.cbSize = ctypes.sizeof(li)
+    if not user32.GetLastInputInfo(ctypes.byref(li)):
+        return 0.0
+    return ((kernel32.GetTickCount() - li.dwTime) & 0xFFFFFFFF) / 1000.0
+
+
+def broadcast_setting_change(area: str) -> None:
+    """Сообщить всем окнам об изменении настройки (например, «ImmersiveColorSet» — тема)."""
+    if not IS_WINDOWS:
+        return
+    res = ctypes.c_size_t()
+    user32.SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, area, SMTO_ABORTIFHUNG, 200,
+                               ctypes.byref(res))
+
+
+def virtual_screen() -> tuple[int, int, int, int]:
+    """Прямоугольник всех мониторов: (x, y, ширина, высота)."""
+    if not IS_WINDOWS:
+        return 0, 0, 1920, 1080
+    g = user32.GetSystemMetrics
+    return g(SM_XVIRTUALSCREEN), g(SM_YVIRTUALSCREEN), g(SM_CXVIRTUALSCREEN), g(SM_CYVIRTUALSCREEN)
+
+
+# ---------------------------------------------------------------- мониторы и окна
+@dataclass(frozen=True)
+class Monitor:
+    handle: int
+    rect: tuple[int, int, int, int]   # left, top, right, bottom
+    work: tuple[int, int, int, int]   # без панели задач
+    device: str                       # \\.\DISPLAY1
+
+
+def monitors() -> list[Monitor]:
+    if not IS_WINDOWS:
+        return []
+    out: list[Monitor] = []
+
+    def cb(hmon, _hdc, _rect, _lp):
+        mi = MONITORINFOEXW()
+        mi.cbSize = ctypes.sizeof(mi)
+        if user32.GetMonitorInfoW(hmon, ctypes.cast(ctypes.byref(mi), ctypes.POINTER(MONITORINFO))):
+            r, w = mi.rcMonitor, mi.rcWork
+            out.append(Monitor(int(hmon or 0), (r.left, r.top, r.right, r.bottom),
+                               (w.left, w.top, w.right, w.bottom), mi.szDevice))
+        return True
+
+    user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(cb), 0)
+    return out
+
+
+def window_monitor(hwnd) -> Monitor | None:
+    if not IS_WINDOWS or not hwnd:
+        return None
+    h = int(user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) or 0)
+    mons = monitors()
+    return next((m for m in mons if m.handle == h), mons[0] if mons else None)
+
+
+def frame_borders(hwnd) -> tuple[int, int, int, int]:
+    """Невидимые рамки окна Windows 10/11 (left, top, right, bottom), чтобы прилипать без щелей."""
+    if not IS_WINDOWS or dwmapi is None:
+        return 0, 0, 0, 0
+    wr, er = wintypes.RECT(), wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(wr)):
+        return 0, 0, 0, 0
+    if dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, ctypes.byref(er), ctypes.sizeof(er)) != 0:
+        return 0, 0, 0, 0
+    return er.left - wr.left, er.top - wr.top, wr.right - er.right, wr.bottom - er.bottom
+
+
+def place_window(hwnd, x: int, y: int, w: int, h: int) -> bool:
+    """Поставить окно точно в прямоугольник (видимыми краями), развернув его из «максимума»."""
+    if not IS_WINDOWS or not hwnd:
+        return False
+    if user32.IsZoomed(hwnd):
+        user32.ShowWindow(hwnd, SW_RESTORE)
+    bl, bt, br, bb = frame_borders(hwnd)
+    return bool(user32.SetWindowPos(hwnd, None, x - bl, y - bt, w + bl + br, h + bt + bb, SWP_NOACTIVATE))
+
+
+def is_maximized(hwnd) -> bool:
+    return bool(IS_WINDOWS and hwnd and user32.IsZoomed(hwnd))
+
+
+def is_shell_window(hwnd) -> bool:
+    """Рабочий стол и панель задач — их двигать нельзя."""
+    return bool(IS_WINDOWS and hwnd and _class_name(hwnd) in SHELL_CLASSES)
+
+
+def visible_rect(hwnd) -> tuple[int, int, int, int] | None:
+    """Видимая часть окна без невидимых рамок: (x, y, ширина, высота)."""
+    if not IS_WINDOWS or not hwnd:
+        return None
+    r = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+        return None
+    bl, bt, br, bb = frame_borders(hwnd)
+    return r.left + bl, r.top + bt, r.right - r.left - bl - br, r.bottom - r.top - bt - bb
+
+
+def toggle_maximize(hwnd) -> None:
+    if IS_WINDOWS and hwnd:
+        user32.ShowWindow(hwnd, SW_RESTORE if user32.IsZoomed(hwnd) else SW_MAXIMIZE)
+
+
+# ---------------------------------------------------------------- гамма (цветовая температура)
+IDENTITY_RAMP = tuple(i * 257 for i in range(256)) * 3
+
+
+def _monitor_dcs():
+    for m in monitors() or [Monitor(0, (0, 0, 0, 0), (0, 0, 0, 0), "")]:
+        dc = gdi32.CreateDCW(None, m.device, None, None) if m.device else user32.GetDC(None)
+        if not dc:
+            continue
+        try:
+            yield m.device, dc
+        finally:
+            gdi32.DeleteDC(dc) if m.device else user32.ReleaseDC(None, dc)
+
+
+def get_gamma_ramps() -> dict[str, tuple]:
+    """Текущие таблицы гаммы мониторов (в них бывает калибровка из профиля ICC)."""
+    if not IS_WINDOWS:
+        return {}
+    out = {}
+    for device, dc in _monitor_dcs():
+        ramp = (ctypes.c_ushort * 768)()
+        if gdi32.GetDeviceGammaRamp(dc, ramp):
+            out[device] = tuple(ramp)
+    return out
+
+
+def scaled_ramp(base, r: float, g: float, b: float):
+    ramp = (ctypes.c_ushort * 768)()
+    for ch, k in enumerate((r, g, b)):
+        off = ch * 256
+        for i in range(256):
+            ramp[off + i] = min(65535, int(base[off + i] * k))
+    return ramp
+
+
+def set_gamma(r: float, g: float, b: float, base: dict | None = None) -> bool:
+    """Множители каналов 0..1 для всех мониторов поверх base (исходной гаммы с калибровкой).
+
+    False — Windows отклонила таблицу (слишком сильное изменение) или драйвер не умеет гамму.
+    """
+    if not IS_WINDOWS:
+        return False
+    ok = False
+    for device, dc in _monitor_dcs():
+        src = (base or {}).get(device) or IDENTITY_RAMP
+        ok = bool(gdi32.SetDeviceGammaRamp(dc, scaled_ramp(src, r, g, b))) or ok
+    return ok
+
+
+# ---------------------------------------------------------------- снимок экрана
+SRCCOPY, CAPTUREBLT = 0x00CC0020, 0x40000000
+
+
+def grab_region(x1: int, y1: int, x2: int, y2: int) -> tuple[int, int, bytes] | None:
+    """Снимок прямоугольника экрана → (ширина, высота, пиксели BGRA сверху вниз).
+
+    Координаты — те же, что у курсора и окон tkinter этого процесса (одинаковый режим DPI),
+    поэтому область, обведённая мышью, совпадает со снимком и на мониторах с масштабом.
+    """
+    if not IS_WINDOWS:
+        return None
+    w, h = max(1, x2 - x1), max(1, y2 - y1)
+    screen = user32.GetDC(None)
+    mem = gdi32.CreateCompatibleDC(screen)
+    bmp = gdi32.CreateCompatibleBitmap(screen, w, h)
+    old = gdi32.SelectObject(mem, bmp)
+    try:
+        if not gdi32.BitBlt(mem, 0, 0, w, h, screen, x1, y1, SRCCOPY | CAPTUREBLT):
+            return None
+        bi = BITMAPINFOHEADER()
+        bi.biSize = ctypes.sizeof(bi)
+        bi.biWidth, bi.biHeight = w, -h  # отрицательная высота — строки сверху вниз
+        bi.biPlanes, bi.biBitCount = 1, 32
+        buf = ctypes.create_string_buffer(w * h * 4)
+        # GetDIBits требует, чтобы битмап не был выбран в DC
+        gdi32.SelectObject(mem, old)
+        old = None
+        if gdi32.GetDIBits(mem, bmp, 0, h, buf, ctypes.byref(bi), 0) != h:
+            return None
+        return w, h, buf.raw
+    finally:
+        if old is not None:
+            gdi32.SelectObject(mem, old)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(mem)
+        user32.ReleaseDC(None, screen)

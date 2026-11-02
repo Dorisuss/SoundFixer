@@ -74,6 +74,7 @@ class App:
         self.hotkeys = Hotkeys(lambda name: self.ui(self._on_hotkey, name))
         self.ptt = PushToTalk(lambda down: self.ui(self._on_ptt, down))
         self.tools = ToolManager(self)
+        self._osd = None
 
     # ================================================================ запуск/выход
     def run(self) -> None:
@@ -99,7 +100,9 @@ class App:
         self.save_now()
         self.ptt.stop()
         self.hotkeys.stop()
-        self.tools.stop_all()  # вернуть настройки Windows (залипание клавиш, сон) как были
+        self.tools.stop_all()  # вернуть настройки Windows (залипание клавиш, сон, гамму) как были
+        if self._osd is not None:
+            self._osd.destroy()
         try:
             self.worker.call(self._w_shutdown, timeout=5)
         except Exception:  # noqa: BLE001
@@ -140,6 +143,15 @@ class App:
             self.tray.notify(title, text)
 
     @property
+    def osd(self):
+        """Подсказка поверх всех окон (не сворачивает игры). Только GUI-поток; None вне Windows."""
+        if self._osd is None and sys.platform == "win32":
+            from .tools.overlay import Osd
+
+            self._osd = Osd(self.root)
+        return self._osd
+
+    @property
     def window_visible(self) -> bool:
         try:
             return self.window is not None and self.root.state() != "withdrawn"
@@ -172,13 +184,16 @@ class App:
         snap = self._publish()
         self.worker.submit(lambda: self._w_sync(snap, force=True), key="sync")
 
-    def switch_profile(self, name: str) -> None:
+    def switch_profile(self, name: str, quiet: bool = False) -> None:
         if name not in self.cfg["profiles"]:
             return
         self.cfg["active_profile"] = name
         self.save_soon()
         self.settings_changed(devices=True)
-        self.notify(APP_NAME, f"Профиль: {name}")
+        if not quiet:
+            self.notify(APP_NAME, f"Профиль: {name}")
+        if self.window is not None:
+            self.window.refresh()
 
     def set_device(self, kind: str, device_id: str | None) -> None:
         self.profile["input_id" if kind == "in" else "output_id"] = device_id
@@ -251,8 +266,10 @@ class App:
         if dev:
             hw_mute = muted and not eng_on
             self.worker.submit(lambda: self.audio and self.audio.set_mute(dev, hw_mute))
-        if announce:
+        guard = self.tools.get("micguard")
+        if announce and not (guard is not None and guard.running and self.cfg["tools"]["micguard"]["osd"]):
             self.notify(APP_NAME, "Микрофон выключен" if muted else "Микрофон включён")
+        self.tools.broadcast("on_mute", muted, announce)
         self.refresh_ui()
 
     def _on_ptt(self, down: bool) -> None:
@@ -324,6 +341,66 @@ class App:
         d = self.tools.download
         return d is not None and d.state in ("waiting", "downloading", "countdown")
 
+    def start_sleep_timer(self, minutes: float | None = None) -> None:
+        from .tools.system import SleepTimer
+
+        self.cancel_sleep_timer()
+        st = self.cfg["tools"]["sleeptimer"]
+        if minutes is not None:
+            st["minutes"] = int(minutes)
+            self.save_soon()
+        self.tools.sleep_timer = SleepTimer(self, st["minutes"], st["action"], st["fade"])
+        self.tools.sleep_timer.start()
+        if self.window is not None:
+            self.window.refresh()
+        self.tool_status_changed("sleeptimer")
+        self.tray.refresh()
+
+    def cancel_sleep_timer(self) -> None:
+        if self.tools.sleep_timer is not None:
+            self.tools.sleep_timer.cancel()
+            self.tools.sleep_timer = None
+            self.tool_status_changed("sleeptimer")
+            self.tray.refresh()
+
+    @property
+    def sleep_timer_active(self) -> bool:
+        t = self.tools.sleep_timer
+        return t is not None and t.state in ("running", "fading")
+
+    def open_mixer(self) -> None:
+        self.tools.instance("apps").open_mixer()
+
+    def screen_text(self) -> None:
+        self.tools.instance("ocr").grab()
+
+    def pick_locksmith(self) -> None:
+        from tkinter import filedialog
+
+        path = filedialog.askopenfilename(title="Какой файл не удаляется или не открывается?")
+        if path:
+            self.open_locksmith([path])
+
+    def set_brightness(self, level: int) -> None:
+        tool = self.tools.get("brightness")
+        if tool is not None and tool.running:
+            tool.set_level(level, osd=True)
+
+    def open_locksmith(self, paths: list[str]) -> None:
+        from .tools.system import LocksmithWindow
+
+        LocksmithWindow(self.root, paths)
+
+    def set_power_option(self, option: str) -> None:
+        tool = self.tools.get("power")
+        if tool is not None and tool.running:
+            tool.user_choice(option)
+        else:
+            from .tools.system import set_power
+
+            set_power(option)
+        self.tool_status_changed("power")
+
     # ---------------------------------------------------------------- озвучка / саундборд
     def speak(self, text: str, remember: bool = True) -> None:
         """Озвучить текст: слышите вы (наушники) и — если работает обработка микрофона — собеседники."""
@@ -339,6 +416,17 @@ class App:
         self._media_then_play(lambda: self._m_tts().synth(text, tts), what="Озвучка",
                               gain=tts["volume"] / 100.0, through_fx=tts["through_fx"], monitor=tts["monitor"],
                               tag="tts", queue=True)
+
+    def speak_local(self, text: str, lang: str | None = None) -> None:
+        """Прочитать вслух только для себя (в наушники): перевод, текст с экрана."""
+        text = text.strip()[:3000]
+        if not text:
+            return
+        tts = copy.deepcopy(self.cfg["tts"])
+        tts["lang"] = lang
+        self._media_then_play(lambda: self._m_tts().synth(text, tts), what="Чтение вслух",
+                              gain=tts["volume"] / 100.0, through_fx=False, monitor=True, tag="local",
+                              exclusive=True, to_mic=False)
 
     def repeat_last(self) -> None:
         hist = self.cfg["tts"]["history"]
@@ -1099,6 +1187,12 @@ def main(argv: list[str] | None = None) -> int:
         except (AttributeError, OSError):
             pass
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("SoundFixer.App")
+
+    if "--locksmith" in argv:  # «Чем занят?» из меню проводника — отдельное окно, без трея и звука
+        from .tools.system import run_locksmith_standalone
+
+        i = argv.index("--locksmith")
+        return run_locksmith_standalone([p for p in argv[i + 1:] if p])
 
     from .single import SingleInstance
 

@@ -10,6 +10,15 @@ sounddevice>=0.5.0
 pedalboard>=0.9.12
 # Нейроголоса Microsoft для озвучки (нужен интернет)
 edge-tts>=7.0
+# Мультитул: QR-код буфера обмена и «Текст с экрана» (встроенное распознавание Windows 10/11)
+qrcode>=7.4
+winrt-runtime>=2.0; sys_platform == "win32"
+winrt-Windows.Foundation>=2.0; sys_platform == "win32"
+winrt-Windows.Foundation.Collections>=2.0; sys_platform == "win32"
+winrt-Windows.Globalization>=2.0; sys_platform == "win32"
+winrt-Windows.Graphics.Imaging>=2.0; sys_platform == "win32"
+winrt-Windows.Media.Ocr>=2.0; sys_platform == "win32"
+winrt-Windows.Storage.Streams>=2.0; sys_platform == "win32"
 # ИИ-шумоподавление DeepFilterNet3 уже лежит в soundfixer/bin и soundfixer/models.
 # Запасная лёгкая нейросеть RNNoise ставится отдельно и без зависимостей
 # (иначе pip потянет ненужные matplotlib/audiolab):

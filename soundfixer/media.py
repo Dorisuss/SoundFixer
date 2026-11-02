@@ -197,6 +197,14 @@ class EdgeTTS:
 
 
 # --------------------------------------------------------------------------- менеджер
+# голос для текста на другом языке (перевод, текст с экрана), если выбранный голос его не знает
+LANG_EDGE_VOICES = {"en": "en-US-AriaNeural", "ru": "ru-RU-SvetlanaNeural", "uk": "uk-UA-PolinaNeural",
+                    "de": "de-DE-KatjaNeural", "fr": "fr-FR-DeniseNeural", "es": "es-ES-ElviraNeural",
+                    "zh": "zh-CN-XiaoxiaoNeural", "ja": "ja-JP-NanamiNeural", "kk": "kk-KZ-AigulNeural"}
+LANG_SAPI_WORDS = {"en": "english", "ru": "russian", "uk": "ukrainian", "de": "german", "fr": "french",
+                   "es": "spanish", "zh": "chinese", "ja": "japanese", "kk": "kazakh"}
+
+
 class TTS:
     """Выбирает движок, кэширует результат (одинаковая фраза не синтезируется заново)."""
 
@@ -207,9 +215,27 @@ class TTS:
         self.edge = EdgeTTS()
         self._cache: OrderedDict[tuple, np.ndarray] = OrderedDict()
 
+    def voice_for(self, engine: str, voice: str, lang: str | None) -> str:
+        lang = (lang or "").split("-")[0].lower()
+        if not lang:
+            return voice
+        if engine == "edge":
+            if voice and voice.lower().startswith(lang + "-"):
+                return voice
+            return LANG_EDGE_VOICES.get(lang, voice)
+        word = LANG_SAPI_WORDS.get(lang)
+        if not word or word in (voice or "").lower():
+            return voice
+        try:
+            names = list(self.sapi._tokens) or self.sapi.voices()
+        except TTSError:
+            return voice
+        return next((n for n in names if word in n.lower()), voice)
+
     def synth(self, text: str, cfg: dict) -> np.ndarray:
         engine = cfg.get("engine", "sapi")
         voice = cfg.get("edge_voice") if engine == "edge" else cfg.get("voice", "")
+        voice = self.voice_for(engine, voice, cfg.get("lang"))
         key = (engine, voice, int(cfg.get("rate", 0)), int(cfg.get("pitch", 0)), text)
         if key in self._cache:
             self._cache.move_to_end(key)
