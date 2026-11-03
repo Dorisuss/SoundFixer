@@ -61,12 +61,11 @@ class Tray:
             from .tools.system import active_power, power_plans
 
             try:
-                plans = power_plans()
-            except Exception:  # noqa: BLE001
-                plans = []
+                plans, active = power_plans(), active_power()
+            except Exception:  # noqa: BLE001 — меню трея не должно падать из-за схем питания
+                plans, active = [], ()
             for option, name in plans:
-                yield Item(name, power(option), radio=True,
-                           checked=lambda _it, o=option: o in active_power())
+                yield Item(name, power(option), radio=True, checked=lambda _it, o=option: o in active)
 
         def tool_items():
             tools = app.cfg["tools"]

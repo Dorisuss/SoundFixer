@@ -38,6 +38,8 @@ class App:
         self.root = tk.Tk()
         self.root.withdraw()
         self.root.title(APP_NAME)
+        self.root.report_callback_exception = self._tk_error  # иначе ошибки окна пропадают (нет консоли)
+        self._error_shown = False
         self._save_job = None
         self._alive = True
 
@@ -112,6 +114,26 @@ class App:
         self.tray.stop()
         self.root.after(50, self.root.destroy)
 
+    def _tk_error(self, exc_type, exc, tb) -> None:
+        log.critical("Ошибка в интерфейсе", exc_info=(exc_type, exc, tb))
+        if self._error_shown:
+            return
+        self._error_shown = True  # одно окно за сеанс, дальше — только в журнал
+        try:
+            from tkinter import messagebox
+
+            messagebox.showerror(APP_NAME, f"Ошибка: {exc}\n\nПрограмма продолжит работу. Подробности в журнале:\n"
+                                           f"{config.LOG_FILE}")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def show_from_other_instance(self, inst) -> None:
+        """Повторный запуск программы: показать окно и подтвердить второму экземпляру."""
+        try:
+            self.show_window()
+        finally:
+            inst.acknowledge()
+
     def ui(self, fn, *args) -> None:
         """Выполнить fn в GUI-потоке (безопасно вызывать из любого потока)."""
         if not self._alive and fn is not self.quit:
@@ -164,6 +186,7 @@ class App:
             from .gui import MainWindow
 
             self.window = MainWindow(self)
+            log.info("Окно открыто")
         self.window.show()
 
     def refresh_ui(self) -> None:
@@ -1155,14 +1178,27 @@ class App:
         self.ui(callback, "\n".join(lines))
 
 
+_native_crash_file = None
+
+
 def setup_logging() -> None:
     from logging.handlers import RotatingFileHandler
 
+    global _native_crash_file
     handlers: list[logging.Handler] = []
     try:
         config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         handlers.append(RotatingFileHandler(config.LOG_FILE, maxBytes=256_000, backupCount=1, encoding="utf-8"))
-    except OSError:
+        # падение внутри библиотек на C (звук, окно) — Python успеет записать, где это случилось.
+        # Запись прошлого запуска сохраняется в crash-native.prev.log, чтобы её можно было прислать.
+        import faulthandler
+
+        native = config.CONFIG_DIR / "crash-native.log"
+        if native.exists() and native.stat().st_size:
+            native.replace(native.with_name("crash-native.prev.log"))
+        _native_crash_file = open(native, "w", encoding="utf-8")  # noqa: SIM115
+        faulthandler.enable(_native_crash_file, all_threads=True)
+    except (OSError, RuntimeError):
         pass
     if sys.stderr is not None:  # pythonw: stderr нет
         handlers.append(logging.StreamHandler())
@@ -1179,6 +1215,10 @@ def setup_logging() -> None:
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     setup_logging()
+    from . import __version__
+
+    log.info("%s %s запускается: Python %s, %s, %s", APP_NAME, __version__, sys.version.split()[0],
+             "exe" if getattr(sys, "frozen", False) else "скрипт", sys.executable)
     if sys.platform == "win32":
         import ctypes
 
@@ -1198,9 +1238,12 @@ def main(argv: list[str] | None = None) -> int:
 
     inst = SingleInstance()
     if not inst.primary:
-        inst.notify_primary()
-        return 0
+        if inst.notify_primary():
+            return 0  # уже запущенная программа показала своё окно
+        if not inst.ask_restart():
+            return 0
+        log.warning("Предыдущий экземпляр не отвечал — закрыт, запускаюсь заново")
     app = App(start_hidden=autostart.TRAY_ARG in argv)
-    inst.listen(lambda: app.ui(app.show_window))
+    inst.listen(lambda: app.ui(app.show_from_other_instance, inst))
     app.run()
     return 0
